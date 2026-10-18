@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
 import {
   compose,
   dockerResources,
@@ -29,6 +28,7 @@ import {
   ownedSupervisorPid,
   readStateOwnership,
   releaseSupervisor,
+  spawnOwnedProcess,
   terminateOwnedProcessGroups,
   writeProcessRecords
 } from "./dev-stack-safety.mjs";
@@ -47,10 +47,9 @@ function prefixStream(stream, label, target) {
 }
 
 function spawnService(config, name, command, args, env, ownership, onUnexpectedExit) {
-  const child = spawn(command, args, {
+  const child = spawnOwnedProcess(ownership, command, args, {
     cwd: config.root,
-    env: { ...env, SPACE_DEV_PROCESS_TOKEN: ownership.token },
-    detached: process.platform !== "win32",
+    env,
     stdio: ["ignore", "pipe", "pipe"]
   });
   if (!Number.isInteger(child.pid) || child.pid <= 1) throw new Error(`Could not establish a process-group leader for ${name}.`);
@@ -249,10 +248,9 @@ export async function start(config) {
     if (stopping) throw new Error("Refusing to build while the dev stack is stopping.");
     // Builds can spawn compilers of their own. Track the transient group just
     // like a service so shutdown owns the whole tree, not only the npm leader.
-    const child = spawn(command, args, {
+    const child = spawnOwnedProcess(ownership, command, args, {
       cwd: config.root,
-      env: { ...(options.env ?? process.env), SPACE_DEV_PROCESS_TOKEN: ownership.token },
-      detached: process.platform !== "win32",
+      env: options.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const completed = new Promise((resolvePromise, rejectPromise) => {

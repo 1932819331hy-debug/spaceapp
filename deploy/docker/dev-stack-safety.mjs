@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { pidAlive, run, sleep } from "./dev-stack-lib.mjs";
@@ -6,6 +7,19 @@ import { pidAlive, run, sleep } from "./dev-stack-lib.mjs";
 const unsafeOverrideKeys = ["SPACE_DEV_STACK_DIR", "SPACE_DEV_COMPOSE_PROJECT"];
 const ownershipVersion = 1;
 const processRecordVersion = 1;
+const spawnedChildren = new WeakMap();
+
+export function spawnOwnedProcess(ownership, command, args, options = {}) {
+  const child = spawn(command, args, {
+    ...options,
+    env: { ...(options.env ?? process.env), SPACE_DEV_PROCESS_TOKEN: ownership.token },
+    detached: process.platform !== "win32"
+  });
+  if (Number.isInteger(child.pid) && child.pid > 1) {
+    spawnedChildren.set(child, { pid: child.pid, token: ownership.token });
+  }
+  return child;
+}
 
 export function assertSafeDevStackOverrides(env = process.env) {
   for (const key of unsafeOverrideKeys) {
@@ -236,8 +250,13 @@ async function processHasToken(pid, token, runner = run) {
 async function snapshotLiveGroup(record, ownership, child, runner) {
   const isLiveChild = () => child?.pid === record.pid && child.exitCode === null && child.signalCode === null;
   if (!isLiveChild()) return new Map();
+  const spawned = spawnedChildren.get(child);
+  const spawnedHere = spawned?.pid === record.pid && spawned.token === ownership.token;
   const members = await listGroupMembers(record, runner);
-  if (!members.some((member) => member.pid === child.pid) || !await processHasToken(child.pid, ownership.token, runner) || !isLiveChild()) {
+  // npm rewrites process.title; Darwin ps can then omit its environment.
+  // Only our exact, still-live spawned handle supplies alternative provenance.
+  // A persisted record or another object with the same PID cannot supply it.
+  if (!members.some((member) => member.pid === child.pid) || (!spawnedHere && !await processHasToken(child.pid, ownership.token, runner)) || !isLiveChild()) {
     return new Map();
   }
   // The current supervisor's live child anchors this session. Descendants may

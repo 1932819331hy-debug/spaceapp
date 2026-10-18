@@ -28,6 +28,7 @@ import {
   ownedSupervisorPid,
   readStateOwnership,
   releaseSupervisor,
+  spawnOwnedProcess,
   supervisorRecordMatches,
   terminateOwnedProcessGroups,
   writeProcessRecords
@@ -87,7 +88,8 @@ test("build markers ignore generated-directory timestamps but detect source chan
 });
 
 test("startup build ownership covers cancellation, success, and failure", { skip: process.platform === "win32" }, async (t) => {
-  for (const mode of ["cancel", "success", "failure", "spawn-failure"]) await t.test(mode, async () => {
+  for (const mode of ["cancel", "renamed-cancel", "success", "failure", "spawn-failure"]) await t.test(mode, async () => {
+    const cancel = mode.endsWith("cancel");
     const root = await mkdtemp(join(tmpdir(), "spaceapp-build-cancel-"));
     const config = await resolveConfig({}, root);
     const bin = join(root, "fake-bin");
@@ -110,10 +112,11 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       await writeFile(join(bin, "npm"), `#!${process.execPath}
         const fs = require("node:fs");
         if (process.argv[3] === "build") {
-          if (${JSON.stringify(mode)} !== "cancel") {
+          if (${!cancel}) {
             fs.writeFileSync(${JSON.stringify(familyFile)}, JSON.stringify({ leader: process.pid }));
             process.exit(${mode === "failure" ? 2 : 0});
           }
+          process.title = "npm run build";
           const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { env: {}, stdio: ["ignore", "inherit", "inherit"] });
           fs.writeFileSync(${JSON.stringify(familyFile)}, JSON.stringify({ leader: process.pid, descendant: descendant.pid }));
           setInterval(() => {}, 1000);
@@ -122,6 +125,23 @@ test("startup build ownership covers cancellation, success, and failure", { skip
           process.exit(2); // Stop the fixture before launching real services.
         }
       `, { mode: 0o700 });
+      if (mode === "renamed-cancel") {
+        // Darwin ps can stop at process.title's NUL padding before reaching
+        // the environment. Model that output on every test platform.
+        await writeFile(join(bin, "ps"), `#!${process.execPath}
+          const fs = require("node:fs");
+          const args = process.argv.slice(2);
+          const family = fs.existsSync(${JSON.stringify(familyFile)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(familyFile)}, "utf8")) : {};
+          if (args[0] === "eww" && Number(args[args.indexOf("-p") + 1]) === family.leader) {
+            console.log("npm run build");
+          } else {
+            const result = require("node:child_process").spawnSync("/bin/ps", args, { encoding: "utf8" });
+            process.stdout.write(result.stdout || "");
+            process.stderr.write(result.stderr || "");
+            process.exit(result.status ?? 1);
+          }
+        `, { mode: 0o700 });
+      }
       if (mode === "spawn-failure") {
         await writeFile(join(bin, "npm"), "#!/spaceapp-test-nonexistent-interpreter\n", { mode: 0o700 });
       }
@@ -143,7 +163,7 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       while (!existsSync(familyFile) && Date.now() < startedDeadline && supervisor.exitCode === null) await sleep(25);
       assert.equal(existsSync(familyFile), mode !== "spawn-failure", output);
       if (existsSync(familyFile)) family = JSON.parse(await readFile(familyFile, "utf8"));
-      if (mode === "cancel") supervisor.kill("SIGTERM");
+      if (cancel) supervisor.kill("SIGTERM");
       const stoppedDeadline = Date.now() + 10000;
       while (supervisor.exitCode === null && supervisor.signalCode === null && Date.now() < stoppedDeadline) await sleep(25);
       assert.notEqual(supervisor.exitCode ?? supervisor.signalCode, null, output);
@@ -476,7 +496,7 @@ test("persisted process-group ownership cleans descendants after the leader exit
   }
 });
 
-test("live child ownership cleans environment-sanitized descendants without relaxing persisted recovery", { skip: process.platform === "win32" }, async () => {
+test("registered renamed children clean sanitized descendants without relaxing persisted recovery", { skip: process.platform === "win32" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "spaceapp-sanitized-descendant-"));
   const config = { rootHash: "abcdef0123", processFile: join(root, "process-groups.json") };
   const owner = ownership(config.rootHash);
@@ -486,11 +506,16 @@ test("live child ownership cleans environment-sanitized descendants without rela
     require("node:fs").writeFileSync(${JSON.stringify(readyFile)}, JSON.stringify({ pid: process.pid, token: process.env.SPACE_DEV_PROCESS_TOKEN }));
     setInterval(() => {}, 1000);
   `;
-  const leader = spawn(process.execPath, ["-e", `
+  const leader = spawnOwnedProcess(owner, process.execPath, ["-e", `
+    process.title = "npm exec tsx watch";
     require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: "ignore", env: {} });
     setInterval(() => {}, 1000);
-  `], { detached: true, stdio: "ignore", env: { ...process.env, SPACE_DEV_PROCESS_TOKEN: owner.token } });
+  `], { stdio: "ignore" });
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
   const record = { name: "sanitized-probe", pid: leader.pid, pgid: leader.pid, sid: leader.pid };
+  const runner = (command, args, options) => args[0] === "eww" && Number(args[args.indexOf("-p") + 1]) === leader.pid
+    ? Promise.resolve({ code: 0, stdout: "npm exec tsx watch", stderr: "" })
+    : run(command, args, options);
   try {
     await writeProcessRecords(config, owner, [record]);
     const deadline = Date.now() + 3000;
@@ -499,19 +524,55 @@ test("live child ownership cleans environment-sanitized descendants without rela
     assert.equal(descendant.token, undefined);
     assert.equal(leader.exitCode, null);
 
-    await assert.rejects(() => terminateOwnedProcessGroups(config, owner), /does not carry this dev-stack ownership token/);
-    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { liveChildren: [leader] }), /does not carry this dev-stack ownership token/);
-    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { records: [record] }), /does not carry this dev-stack ownership token/);
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { runner }), /does not carry this dev-stack ownership token/);
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { liveChildren: [leader], runner }), /does not carry this dev-stack ownership token/);
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { records: [record], runner }), /does not carry this dev-stack ownership token/);
     assert.equal(existsSync(config.processFile), true);
 
-    await terminateOwnedProcessGroups(config, owner, { records: [record], liveChildren: [leader], timeoutMs: 100 });
+    await terminateOwnedProcessGroups(config, owner, { records: [record], liveChildren: [leader], runner, timeoutMs: 100 });
     const status = await run("ps", ["-p", String(descendant.pid), "-o", "stat="], { capture: true, allowFailure: true });
     assert.ok(status.code !== 0 || status.stdout.startsWith("Z"));
     assert.notEqual(leader.signalCode, null);
+    assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "an unrelated process must remain alive");
   } finally {
     try { process.kill(-leader.pid, "SIGKILL"); } catch {}
+    try { process.kill(-unrelated.pid, "SIGKILL"); } catch {}
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("spawn registration rejects spoofed handles, other tokens, reused identities, and exit races", { skip: process.platform === "win32" }, async (t) => {
+  const config = { rootHash: "abcdef0123" };
+  const owner = ownership(config.rootHash);
+  const startedAt = "Sun Oct 18 07:40:00 2026";
+  for (const scenario of ["spoofed handle", "other token", "reused identity", "exit during snapshot"]) await t.test(scenario, async () => {
+    const leader = spawnOwnedProcess(owner, process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const record = { name: "registered-probe", pid: leader.pid, pgid: leader.pid, sid: leader.pid };
+    const signals = [];
+    let inventories = 0;
+    try {
+      const runner = async (_command, args) => {
+        if (args[0] !== "-axo") return { code: 0, stdout: "npm", stderr: "" };
+        inventories += 1;
+        if (scenario === "exit during snapshot" && inventories === 1) {
+          const exited = new Promise(resolvePromise => leader.once("exit", resolvePromise));
+          leader.kill("SIGTERM");
+          await exited;
+        }
+        const identity = scenario === "reused identity" && inventories > 1 ? "Sun Oct 18 07:41:00 2026" : startedAt;
+        return { code: 0, stdout: `${leader.pid} ${leader.pid} S ${identity}\n`, stderr: "" };
+      };
+      const child = scenario === "spoofed handle" ? { pid: leader.pid, exitCode: null, signalCode: null } : leader;
+      const candidateOwner = scenario === "other token" ? { ...owner, token: "b".repeat(48) } : owner;
+      await assert.rejects(() => terminateOwnedProcessGroups(config, candidateOwner, {
+        records: [record], liveChildren: [child], runner, timeoutMs: 0,
+        signaler: (...args) => signals.push(args)
+      }), /does not carry this dev-stack ownership token/);
+      assert.deepEqual(signals, []);
+    } finally {
+      try { process.kill(-leader.pid, "SIGKILL"); } catch {}
+    }
+  });
 });
 
 test("live group snapshots fail closed on stale leaders and changed process identities", { skip: process.platform === "win32" }, async (t) => {
