@@ -88,12 +88,19 @@ const csrf = csrfResponse.payload?.csrfToken;
 const csrfHeader = csrfResponse.payload?.headerName || "x-space-csrf-token";
 if (typeof csrf !== "string" || !csrf) throw new Error("Authenticated owner session did not return a CSRF token.");
 
+const roomsResponse = await request("/api/rooms", { cookie });
+const rooms = Array.isArray(roomsResponse.payload) ? roomsResponse.payload : (roomsResponse.payload?.data ?? []);
+const starterRoom = rooms.find((candidate) => candidate?.id === starterRoomId);
+if (!starterRoom || typeof starterRoom.name !== "string" || !starterRoom.name.trim()) {
+  throw new Error("Could not resolve the Getting Started room name required by the room update contract.");
+}
+
 await request(`/api/rooms/${encodeURIComponent(starterRoomId)}`, {
   method: "PATCH",
   cookie,
   csrf,
   csrfHeader,
-  body: { projectPath: root }
+  body: { name: starterRoom.name, projectPath: root }
 });
 console.log("[dev-stack-verify] PASS starter room points at the source checkout");
 
