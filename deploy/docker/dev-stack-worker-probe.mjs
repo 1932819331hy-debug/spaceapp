@@ -205,6 +205,15 @@ async function main() {
     assert.notEqual(afterReady.apiStartedAt, initialReady.apiStartedAt);
     assert.equal((await safety.readStateOwnership(config)).token, ownership.token);
     receipt.explicitRestartReady = true;
+    // Assert the real second boot does not advertise the now-consumed setup
+    // secret. Restrict inspection to the recovery log suffix: the original
+    // first-owner boot legitimately printed its one-time token.
+    const restartOutput = await until("Claimed-owner startup banner", async () => {
+      const text = (await readFile(log)).subarray(recoveryOffset).toString("utf8");
+      return text.includes("Owner setup already complete; sign in with the existing owner account.") && text;
+    });
+    assert(!restartOutput.includes("Owner setup token: "), "Recovered stack printed a consumed owner setup token.");
+    receipt.claimedOwnerTokenSuppressed = true;
     assert.deepEqual(await loginAndRooms(api), owner, "The same owner credentials and room IDs must survive ordinary restart.");
     receipt.originalOwnerAndRoomsPreserved = true;
     assert.equal(await git("rev-parse", "HEAD"), sha);
