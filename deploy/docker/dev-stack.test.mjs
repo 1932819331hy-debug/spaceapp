@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   resolveConfig,
   sourceEnv
 } from "./dev-stack-lib.mjs";
+import { ensureDarwinNodePtySpawnHelpers } from "./dev-stack.mjs";
 import {
   assertSafeDevStackOverrides,
   claimSupervisor,
@@ -108,6 +109,27 @@ test("supervisor identity rejects PID reuse and atomically claims a checkout", a
     await assert.rejects(() => ownedSupervisorPid(config, { identityProvider: reusedIdentity }), /Refusing to signal PID/);
   } finally {
     await releaseSupervisor(config, process.pid).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("macOS source stack repairs node-pty spawn-helper execute permissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-pty-helper-"));
+  const helper = join(root, "node_modules", "node-pty", "prebuilds", "darwin-x64", "spawn-helper");
+  try {
+    await mkdir(join(root, "node_modules", "node-pty", "prebuilds", "darwin-x64"), { recursive: true });
+    await writeFile(helper, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+    await chmod(helper, 0o644);
+
+    const repaired = await ensureDarwinNodePtySpawnHelpers(root, "darwin");
+    assert.deepEqual(repaired, [helper]);
+    assert.equal((await stat(helper)).mode & 0o111, 0o111);
+    assert.deepEqual(await ensureDarwinNodePtySpawnHelpers(root, "darwin"), []);
+
+    await chmod(helper, 0o644);
+    assert.deepEqual(await ensureDarwinNodePtySpawnHelpers(root, "linux"), []);
+    assert.equal((await stat(helper)).mode & 0o111, 0);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
