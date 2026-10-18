@@ -14,7 +14,6 @@ import {
   parsePinnedImages,
   pidAlive,
   prepareState,
-  readSupervisorPid,
   renderCompose,
   repoRoot,
   resolveConfig,
@@ -24,6 +23,12 @@ import {
   waitHealthy,
   waitReady
 } from "./dev-stack-lib.mjs";
+import {
+  assertSafeDevStackOverrides,
+  claimSupervisor,
+  ownedSupervisorPid,
+  releaseSupervisor
+} from "./dev-stack-safety.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 
@@ -98,8 +103,8 @@ async function waitServiceHealthyWithDiagnostics(config, service, timeoutMs) {
 }
 
 export async function down(config) {
-  const pid = await readSupervisorPid(config);
-  if (pid && pid !== process.pid && pidAlive(pid)) {
+  const pid = await ownedSupervisorPid(config);
+  if (pid && pid !== process.pid) {
     process.kill(pid, "SIGTERM");
     await waitSupervisorExit(pid);
   }
@@ -122,10 +127,10 @@ export async function reset(config) {
 }
 
 export async function status(config) {
-  const pid = await readSupervisorPid(config);
+  const pid = await ownedSupervisorPid(config, { strict: false });
   const resources = await dockerResources(config);
   const payload = {
-    running: Boolean(pid && pidAlive(pid)),
+    running: Boolean(pid),
     supervisorPid: pid,
     project: config.project,
     stateRoot: config.stateRoot,
@@ -137,8 +142,8 @@ export async function status(config) {
 }
 
 export async function rebuild(config) {
-  const pid = await readSupervisorPid(config);
-  if (!pid || !pidAlive(pid)) {
+  const pid = await ownedSupervisorPid(config);
+  if (!pid) {
     await ensureBuild(config, true);
     console.log("[dev:stack] Rebuilt source workspaces; no running supervisor to restart.");
     return;
@@ -148,14 +153,11 @@ export async function rebuild(config) {
 }
 
 export async function start(config) {
-  const existingPid = await readSupervisorPid(config);
-  if (existingPid && pidAlive(existingPid)) throw new Error(`Dev stack is already running under supervisor ${existingPid}.`);
-
   const composeTemplate = await readFile(resolve(config.root, "packages/run-spaceapp/templates/compose.yml"), "utf8");
   const dockerfile = await readFile(resolve(config.root, "Dockerfile"), "utf8");
   const images = parsePinnedImages(composeTemplate);
   const openCodeVersion = parseOpenCodeVersion(dockerfile);
-  const { databaseUrl, sessionSecret } = await prepareState(config);
+  const { databaseUrl, sessionSecret, postgresPassword } = await prepareState(config);
   await mkdir(dirname(config.composeFile), { recursive: true, mode: 0o700 });
   await writeFile(config.composeFile, renderCompose(config, images), { mode: 0o600 });
   await writeFile(config.configFile, `${JSON.stringify({
@@ -168,6 +170,7 @@ export async function start(config) {
   }, null, 2)}\n`, { mode: 0o600 });
 
   await run("docker", ["compose", "version"]);
+  await claimSupervisor(config);
   let children = new Map();
   let stopping = false;
   let reloadChain = Promise.resolve();
@@ -185,7 +188,7 @@ export async function start(config) {
     console.log(`[dev:stack] Stopping (${reason})...`);
     await stopChildren();
     if (existsSync(config.composeFile)) await compose(config, ["down", "--remove-orphans"], { allowFailure: true });
-    try { await rm(config.pidFile, { force: true }); } catch {}
+    await releaseSupervisor(config);
   };
 
   const unexpectedExit = (name, child, code, signal) => {
@@ -224,10 +227,11 @@ export async function start(config) {
   process.once("SIGTERM", () => { void shutdown("SIGTERM").finally(() => process.exit(process.exitCode || 0)); });
   process.on("SIGHUP", reload);
 
-  await writeFile(config.pidFile, `${process.pid}\n`, { mode: 0o600 });
   try {
     console.log(`[dev:stack] Starting digest-pinned PostgreSQL and Temporal (${config.project})...`);
-    await compose(config, ["up", "-d", "postgres", "temporal"]);
+    await compose(config, ["up", "-d", "postgres", "temporal"], {
+      env: { ...process.env, SPACEAPP_DEV_POSTGRES_PASSWORD: postgresPassword }
+    });
     await Promise.all([
       waitHealthy(config, "postgres"),
       waitServiceHealthyWithDiagnostics(config, "temporal", 240_000)
@@ -257,6 +261,7 @@ export async function start(config) {
 
 async function main() {
   const command = process.argv[2] || "up";
+  assertSafeDevStackOverrides();
   const config = await resolveConfig();
   if (["up", "start"].includes(command)) return start(config);
   if (["down", "stop"].includes(command)) return down(config);
