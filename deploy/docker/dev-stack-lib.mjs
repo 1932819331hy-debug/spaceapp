@@ -242,6 +242,7 @@ export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
     SPACE_DATABASE_URL: databaseUrl,
     SPACE_SESSION_SECRET: sessionSecret,
     SPACE_SETUP_TOKEN_FILE: join(config.secretsDir, "setup-token"),
+    SPACE_STREAMING_SECRET_ROOT: join(config.secretsDir, "streaming"),
     SPACE_DEV_LOGIN: "false",
     SPACE_GOOGLE_AUTH_DISABLED: "true",
     SPACE_PUBLIC_DISTRIBUTION: "true",

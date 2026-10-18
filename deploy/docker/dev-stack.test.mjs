@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ import {
   installOpenCode,
   parseOpenCodeVersion,
   parsePinnedImages,
+  prepareState,
   renderCompose,
   resolveConfig,
   run,
@@ -143,6 +144,53 @@ test("reset removes only the state directory it initialized when Docker inventor
   } finally {
     if (oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("streaming credentials stay private inside owned state and reset preserves an installed instance", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-streaming-isolation-"));
+  const installedRoot = join(root, "installed-streaming");
+  const oldPath = process.env.PATH;
+  const oldStreamingRoot = process.env.SPACE_STREAMING_SECRET_ROOT;
+  try {
+    await mkdir(installedRoot, { mode: 0o755 });
+    const sentinel = join(installedRoot, "keep.json");
+    await writeFile(sentinel, "installed instance\n", { mode: 0o600 });
+    const installedMode = (await stat(installedRoot)).mode & 0o777;
+    process.env.SPACE_STREAMING_SECRET_ROOT = installedRoot;
+    const config = await resolveConfig({}, root);
+    const env = sourceEnv(config, "postgresql://unused", "test-session-secret", join(config.binDir, "opencode-vscode-parity"));
+    assert.equal(env.SPACE_STREAMING_SECRET_ROOT, join(config.secretsDir, "streaming"));
+    await claimStateOwnership(config);
+    await prepareState(config);
+    await run(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import { StreamingCredentialStore } from "./packages/streaming/src/credential-store.ts";
+      const store = new StreamingCredentialStore(process.env.SPACE_STREAMING_SECRET_ROOT);
+      await store.writeCredential("dev-stack-probe", { probe: "owned test data" });
+    `], { env, capture: true });
+    const streamingRoot = env.SPACE_STREAMING_SECRET_ROOT;
+    const credentials = join(streamingRoot, "credentials");
+    assert.equal((await stat(streamingRoot)).mode & 0o777, 0o700);
+    assert.equal((await stat(credentials)).mode & 0o777, 0o700);
+    const files = await readdir(credentials);
+    assert.equal(files.length, 1);
+    assert.equal((await stat(join(credentials, files[0]))).mode & 0o777, 0o600);
+
+    const bin = join(root, "fake-bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    process.env.PATH = `${bin}:${oldPath || ""}`;
+    await reset(config);
+    assert.equal(existsSync(config.stateRoot), false);
+    assert.equal(await readFile(sentinel, "utf8"), "installed instance\n");
+    assert.equal((await stat(installedRoot)).mode & 0o777, installedMode);
+    assert.deepEqual(await readdir(installedRoot), ["keep.json"]);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldStreamingRoot === undefined) delete process.env.SPACE_STREAMING_SECRET_ROOT;
+    else process.env.SPACE_STREAMING_SECRET_ROOT = oldStreamingRoot;
     await rm(root, { recursive: true, force: true });
   }
 });
