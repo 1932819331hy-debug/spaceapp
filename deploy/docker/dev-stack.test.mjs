@@ -11,6 +11,7 @@ import {
   dockerResources,
   ensureBuild,
   installOpenCode,
+  ownerSetupBanner,
   parseOpenCodeVersion,
   parsePinnedImages,
   prepareState,
@@ -224,6 +225,72 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+test("owner setup banner only reveals a live, unclaimed token", async () => {
+  const config = { ports: { api: 5910 }, secretsDir: "/test/secrets" };
+  const token = "a".repeat(64);
+  const nowMs = Date.parse("2026-10-19T00:00:00Z");
+  let status = { setupRequired: true, expiresAt: "2026-10-19T00:15:00Z" };
+  let reads = 0;
+  const readSecret = async (path, encoding) => {
+    reads++;
+    assert.equal(path, join(config.secretsDir, "setup-token"));
+    assert.equal(encoding, "utf8");
+    return `${token}\n`;
+  };
+  const request = async (url, options) => {
+    assert.equal(url, "http://127.0.0.1:5910/api/setup/status");
+    assert.equal(options.method, "GET");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.headers.accept, "application/json");
+    assert.ok(options.signal instanceof AbortSignal);
+    return { ok: true, status: 200, json: async () => status };
+  };
+  const options = { request, readSecret, nowMs };
+
+  assert.equal(await ownerSetupBanner(config, options), `Owner setup token: ${token}`);
+  assert.equal(reads, 1);
+
+  status = { setupRequired: false, expiresAt: null };
+  const claimed = await ownerSetupBanner(config, options);
+  assert.match(claimed, /Owner setup already complete/);
+  assert.doesNotMatch(claimed, /[a-f0-9]{64}/);
+  assert.equal(reads, 1, "claimed owner must never cause a secret read");
+
+  status = { setupRequired: true, expiresAt: "2026-10-18T23:59:59Z" };
+  assert.match(await ownerSetupBanner(config, options), /expired or unavailable/);
+  assert.equal(reads, 1, "expired setup token must not be read");
+
+  status = { setupRequired: true, expiresAt: null };
+  assert.match(await ownerSetupBanner(config, options), /expired or unavailable/);
+  assert.equal(reads, 1, "missing expiry must not disclose a token");
+
+  status = { setupRequired: true, expiresAt: "2026-10-19T00:15:00Z" };
+  await assert.rejects(() => ownerSetupBanner(config, {
+    request,
+    nowMs,
+    readSecret: async () => "unsafe\\nvalue"
+  }), /Invalid dev-stack owner setup token file/);
+});
+
+test("owner setup banner fails closed on unverifiable API status", async () => {
+  const config = { ports: { api: 5910 }, secretsDir: "/test/secrets" };
+  const readSecret = async () => {
+    assert.fail("unverified owner status must not read local token");
+  };
+  for (const [name, response] of [
+    ["unauthorized response", { ok: false, status: 503 }],
+    ["missing field", { ok: true, json: async () => ({ expiresAt: null }) }],
+    ["invalid expiry type", { ok: true, json: async () => ({ setupRequired: true, expiresAt: 123 }) }],
+    ["malformed payload", { ok: true, json: async () => null }]
+  ]) {
+    await assert.rejects(
+      () => ownerSetupBanner(config, { readSecret, request: async () => response }),
+      /status|token/,
+      name
+    );
+  }
 });
 
 test("source stack derives third-party pins from canonical files", () => {
