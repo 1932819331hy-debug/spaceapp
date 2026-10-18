@@ -1,0 +1,178 @@
+name: Dev stack macOS evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dev-stack-macos.yml"
+      - ".nvmrc"
+      - "Dockerfile"
+      - "package.json"
+      - "package-lock.json"
+      - "CONTRIBUTING.md"
+      - "apps/api/**"
+      - "apps/web/**"
+      - "apps/worker/**"
+      - "packages/**"
+      - "deploy/docker/**"
+  workflow_dispatch:
+  # Temporary contributor-fork trigger so this PR can collect the second-platform
+  # transcript without waiting for upstream approval of forked pull_request jobs.
+  # Remove this branch-specific trigger after a successful evidence run.
+  push:
+    branches:
+      - "feat/dev-stack-65"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-stack-macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-stack-macos:
+    name: Real source stack lifecycle (macOS + Colima)
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install pinned Colima and Docker client
+        shell: bash
+        run: |
+          set -euo pipefail
+          COLIMA_VERSION="0.10.3"
+          COLIMA_SHA256="3082737fe8a98afda11cba7d9a20b6e56fe80c6153464beda04bec630758770b"
+          curl -fsSL \
+            "https://github.com/abiosoft/colima/releases/download/v${COLIMA_VERSION}/colima-Darwin-x86_64" \
+            -o "$RUNNER_TEMP/colima"
+          printf '%s  %s\n' "$COLIMA_SHA256" "$RUNNER_TEMP/colima" | shasum -a 256 -c -
+          chmod 0755 "$RUNNER_TEMP/colima"
+          sudo install -m 0755 "$RUNNER_TEMP/colima" /usr/local/bin/colima
+
+          # Colima itself is pinned above. Lima/Docker are installed from the
+          # runner's Homebrew snapshot and their exact versions are printed into
+          # the evidence transcript below.
+          brew install lima docker docker-compose
+          mkdir -p "$HOME/.docker/cli-plugins"
+          ln -sfn "$(brew --prefix docker-compose)/bin/docker-compose" \
+            "$HOME/.docker/cli-plugins/docker-compose"
+
+          colima version
+          limactl --version
+          docker --version
+          docker compose version
+
+      - name: Start Colima
+        shell: bash
+        run: |
+          set -euo pipefail
+          colima start --cpu 3 --memory 6 --disk 20
+          docker context use colima
+          docker version
+          docker compose version
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      - name: Unit-test dev-stack contracts
+        run: npm run test:dev-stack
+
+      - name: Start full stack without a TTY
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run dev:stack >"$RUNNER_TEMP/dev-stack-macos.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/dev-stack-shell.pid"
+          echo "source stack launched in background on macOS"
+
+      - name: Verify real source-stack acceptance
+        env:
+          SPACE_DEV_VERIFY_READY_TIMEOUT_MS: "600000"
+          SPACE_DEV_VERIFY_CLI_TIMEOUT_MS: "240000"
+        run: npm run verify:dev-stack
+
+      - name: Print auditable macOS terminal evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== platform ==="
+          sw_vers
+          uname -a
+          echo "=== container runtime ==="
+          colima version
+          limactl --version
+          docker version
+          docker compose version
+          echo "=== dev-stack status ==="
+          npm run --silent dev:stack -- status
+          echo "=== loopback listeners ==="
+          lsof -nP -iTCP:5910 -sTCP:LISTEN || true
+          lsof -nP -iTCP:5911 -sTCP:LISTEN || true
+          echo "=== secret modes ==="
+          for file in .dev-stack/secrets/*; do
+            [ -f "$file" ] || continue
+            mode="$(stat -f '%Lp' "$file")"
+            echo "$mode $file"
+            [ "$mode" = "600" ] || { echo "unexpected secret mode for $file" >&2; exit 1; }
+          done
+          echo "=== one-command transcript ==="
+          cat "$RUNNER_TEMP/dev-stack-macos.log"
+
+      - name: Stop and reset owned resources
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm run dev:stack -- down
+          down_status=$?
+          npm run dev:stack -- reset
+          reset_status=$?
+
+          shell_pid="$(cat "$RUNNER_TEMP/dev-stack-shell.pid" 2>/dev/null || true)"
+          for _ in $(seq 1 50); do
+            if [ -z "$shell_pid" ] || ! kill -0 "$shell_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          process_status=0
+          if [ -n "$shell_pid" ] && kill -0 "$shell_pid" 2>/dev/null; then
+            echo "dev-stack launcher process $shell_pid is still alive after reset" >&2
+            process_status=1
+            kill "$shell_pid" 2>/dev/null || true
+          fi
+
+          status_json="$(npm run --silent dev:stack -- status 2>/dev/null)"
+          echo "$status_json"
+          if echo "$status_json" | grep -q '"running": true'; then
+            echo "dev-stack supervisor still reports running after reset" >&2
+            process_status=1
+          fi
+          if ! echo "$status_json" | grep -q '"containers": \[\]'; then
+            echo "dev-stack containers remain after reset" >&2
+            process_status=1
+          fi
+          if ! echo "$status_json" | grep -q '"volumes": \[\]'; then
+            echo "dev-stack volumes remain after reset" >&2
+            process_status=1
+          fi
+
+          echo "=== final macOS dev-stack log ==="
+          cat "$RUNNER_TEMP/dev-stack-macos.log" 2>/dev/null || true
+          colima stop >/dev/null 2>&1 || true
+
+          if [ "$down_status" -ne 0 ] || [ "$reset_status" -ne 0 ] || [ "$process_status" -ne 0 ]; then
+            exit 1
+          fi
