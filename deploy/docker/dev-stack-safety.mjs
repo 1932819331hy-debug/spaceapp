@@ -55,6 +55,20 @@ export async function isOwnedSupervisor(config, record = null, identityProvider 
   return supervisorRecordMatches(config, candidate, identity);
 }
 
+export async function ownedSupervisorPid(config, { strict = true, identityProvider = processIdentity } = {}) {
+  const record = await readSupervisorRecord(config);
+  if (!record) return null;
+  if (!pidAlive(record.pid)) {
+    await rm(config.pidFile, { force: true });
+    return null;
+  }
+  if (await isOwnedSupervisor(config, record, identityProvider)) return record.pid;
+  if (strict) {
+    throw new Error(`Refusing to signal PID ${record.pid}: the pidfile does not identify this checkout's dev-stack supervisor.`);
+  }
+  return null;
+}
+
 export async function claimSupervisor(config, identityProvider = processIdentity) {
   const existing = await readSupervisorRecord(config);
   if (existing && await isOwnedSupervisor(config, existing, identityProvider)) {
