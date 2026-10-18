@@ -203,7 +203,7 @@ export async function clearProcessRecords(config) {
 }
 
 async function listGroupMembers(record, runner = run) {
-  const result = await runner("ps", ["-axo", "pid=,pgid=,sid=,stat="], { capture: true, allowFailure: true });
+  const result = await runner("ps", ["-axo", "pid=,pgid=,sess=,stat="], { capture: true, allowFailure: true });
   if (result.code !== 0) throw new Error("Could not inventory local processes; refusing to signal a dev-stack process group.");
   const members = [];
   for (const line of result.stdout.split(/\r?\n/)) {
