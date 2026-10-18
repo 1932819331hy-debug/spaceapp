@@ -245,6 +245,39 @@ export async function start(config) {
     await processRecordWrite;
   };
 
+  const runBuild = async (command, args, options = {}) => {
+    if (stopping) throw new Error("Refusing to build while the dev stack is stopping.");
+    // Builds can spawn compilers of their own. Track the transient group just
+    // like a service so shutdown owns the whole tree, not only the npm leader.
+    const child = spawn(command, args, {
+      cwd: config.root,
+      env: { ...(options.env ?? process.env), SPACE_DEV_PROCESS_TOKEN: ownership.token },
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const completed = new Promise((resolvePromise, rejectPromise) => {
+      child.once("error", rejectPromise);
+      child.once("close", (code, signal) => {
+        if (code === 0) resolvePromise();
+        else rejectPromise(new Error(`${command} ${args.join(" ")} failed (${code ?? signal}).`));
+      });
+    });
+    if (!Number.isInteger(child.pid) || child.pid <= 1) {
+      await completed;
+      throw new Error("Could not establish a process-group leader for the build.");
+    }
+    prefixStream(child.stdout, "build", process.stdout);
+    prefixStream(child.stderr, "build", process.stderr);
+    const entry = { child, record: { name: "build", pid: child.pid, pgid: child.pid, sid: child.pid } };
+    children.set("build", entry);
+    await Promise.all([persistChildren(), completed]);
+    if (children.get("build") === entry) {
+      children.delete("build");
+      await persistChildren();
+    }
+    if (stopping) throw new Error("Build cancelled while the dev stack is stopping.");
+  };
+
   const stopChildren = async () => {
     const snapshot = [...children.values()];
     children = new Map();
@@ -299,7 +332,7 @@ export async function start(config) {
   };
 
   const spawnChildren = async (forceBuild = false, state) => {
-    await ensureBuild(config, forceBuild);
+    await ensureBuild(config, forceBuild, runBuild);
     const repairedHelpers = await ensureDarwinNodePtySpawnHelpers(config.root);
     if (repairedHelpers.length) {
       console.log(`[dev:stack] Repaired execute permission on ${repairedHelpers.length} node-pty macOS spawn helper(s).`);
@@ -368,7 +401,7 @@ export async function start(config) {
       waitServiceHealthyWithDiagnostics(config, "temporal", 240_000)
     ]);
     await ensureTemporalNamespace(config);
-    await ensureBuild(config);
+    await ensureBuild(config, false, runBuild);
     console.log("[dev:stack] Applying database migrations...");
     await run("npm", ["run", "db:migrate"], { cwd: config.root, env: { ...process.env, SPACE_DATABASE_URL: databaseUrl } });
     await spawnChildren(false, runtimeState);

@@ -194,7 +194,9 @@ jobs:
 
       - name: Verify readiness, owner setup, and OpenCode pane
         env:
-          SPACE_DEV_VERIFY_READY_TIMEOUT_MS: "900000"
+          # Cold Colima/image startup plus one full source build can exceed 15m.
+          # Keep fresh-checkout startup under test; readiness assertions stay intact.
+          SPACE_DEV_VERIFY_READY_TIMEOUT_MS: "1800000"
           SPACE_DEV_VERIFY_CLI_TIMEOUT_MS: "300000"
         run: npm run verify:dev-stack
 

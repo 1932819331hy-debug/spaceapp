@@ -86,6 +86,90 @@ test("build markers ignore generated-directory timestamps but detect source chan
   }
 });
 
+test("startup build ownership covers cancellation, success, and failure", { skip: process.platform === "win32" }, async (t) => {
+  for (const mode of ["cancel", "success", "failure", "spawn-failure"]) await t.test(mode, async () => {
+    const root = await mkdtemp(join(tmpdir(), "spaceapp-build-cancel-"));
+    const config = await resolveConfig({}, root);
+    const bin = join(root, "fake-bin");
+    const familyFile = join(root, "build-family.json");
+    const migrationFile = join(root, "migration-started");
+    let supervisor;
+    let unrelated;
+    let family;
+    let output = "";
+    try {
+      await mkdir(bin);
+      await mkdir(join(root, "packages", "run-spaceapp", "templates"), { recursive: true });
+      await writeFile(join(root, "packages", "run-spaceapp", "templates", "compose.yml"), `services:\n  postgres:\n    image: pgvector/pgvector:test@sha256:${"a".repeat(64)}\n  temporal:\n    image: temporalio/auto-setup:test@sha256:${"b".repeat(64)}\n`);
+      await writeFile(join(root, "Dockerfile"), "RUN npm install opencode-ai@1.18.4\n");
+      await writeFile(join(bin, "docker"), `#!${process.execPath}
+        const args = process.argv.slice(2);
+        if (args[0] === "inspect") console.log("healthy");
+        else if (args[0] === "compose" && args.includes("ps")) console.log("fixture-service");
+      `, { mode: 0o700 });
+      await writeFile(join(bin, "npm"), `#!${process.execPath}
+        const fs = require("node:fs");
+        if (process.argv[3] === "build") {
+          if (${JSON.stringify(mode)} !== "cancel") {
+            fs.writeFileSync(${JSON.stringify(familyFile)}, JSON.stringify({ leader: process.pid }));
+            process.exit(${mode === "failure" ? 2 : 0});
+          }
+          const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { env: {}, stdio: ["ignore", "inherit", "inherit"] });
+          fs.writeFileSync(${JSON.stringify(familyFile)}, JSON.stringify({ leader: process.pid, descendant: descendant.pid }));
+          setInterval(() => {}, 1000);
+        } else if (process.argv[3] === "db:migrate") {
+          fs.writeFileSync(${JSON.stringify(migrationFile)}, fs.readFileSync(${JSON.stringify(config.processFile)}, "utf8"));
+          process.exit(2); // Stop the fixture before launching real services.
+        }
+      `, { mode: 0o700 });
+      if (mode === "spawn-failure") {
+        await writeFile(join(bin, "npm"), "#!/spaceapp-test-nonexistent-interpreter\n", { mode: 0o700 });
+      }
+      const launcher = join(root, "dev-stack.mjs");
+      await writeFile(launcher, `
+        import { start } from ${JSON.stringify(new URL("./dev-stack.mjs", import.meta.url).href)};
+        import { resolveConfig } from ${JSON.stringify(new URL("./dev-stack-lib.mjs", import.meta.url).href)};
+        start(await resolveConfig({}, ${JSON.stringify(root)})).catch(error => { console.error(error.message); process.exitCode = 1; });
+      `);
+      unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+      supervisor = spawn(process.execPath, [launcher], {
+        detached: true,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      supervisor.stdout.on("data", chunk => { output += chunk.toString(); });
+      supervisor.stderr.on("data", chunk => { output += chunk.toString(); });
+      const startedDeadline = Date.now() + 10000;
+      while (!existsSync(familyFile) && Date.now() < startedDeadline && supervisor.exitCode === null) await sleep(25);
+      assert.equal(existsSync(familyFile), mode !== "spawn-failure", output);
+      if (existsSync(familyFile)) family = JSON.parse(await readFile(familyFile, "utf8"));
+      if (mode === "cancel") supervisor.kill("SIGTERM");
+      const stoppedDeadline = Date.now() + 10000;
+      while (supervisor.exitCode === null && supervisor.signalCode === null && Date.now() < stoppedDeadline) await sleep(25);
+      assert.notEqual(supervisor.exitCode ?? supervisor.signalCode, null, output);
+      for (const pid of [family?.leader, family?.descendant].filter(Number.isInteger)) {
+        const result = await run("ps", ["-p", String(pid), "-o", "stat="], { capture: true, allowFailure: true });
+        assert.ok(result.code !== 0 || result.stdout.startsWith("Z"), `build PID ${pid} survived cancellation: ${result.stdout}`);
+      }
+      assert.equal(existsSync(migrationFile), mode === "success", "only successful builds may advance startup to migrations");
+      assert.equal(existsSync(config.buildMarker), mode === "success", "only successful builds may write a success marker");
+      if (mode === "success") {
+        assert.deepEqual(JSON.parse(await readFile(migrationFile, "utf8")).groups, [], "completed builds must be untracked before migrations");
+      }
+      if (existsSync(config.processFile)) {
+        assert.deepEqual(JSON.parse(await readFile(config.processFile, "utf8")).groups, [], "terminated builds must leave no tracked groups");
+      }
+      assert.equal(existsSync(config.pidFile), false);
+      assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "an unrelated process must remain alive");
+    } finally {
+      for (const pid of [supervisor?.pid, family?.leader, unrelated?.pid]) {
+        if (Number.isInteger(pid)) try { process.kill(-pid, "SIGKILL"); } catch {}
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("source stack derives third-party pins from canonical files", () => {
   const images = parsePinnedImages(`
 services:

@@ -166,9 +166,11 @@ export async function ensureBuild(config, force = false, runner = run) {
   const marker = existsSync(config.buildMarker) ? JSON.parse(await readFile(config.buildMarker, "utf8")) : null;
   const sourceFingerprint = await buildSourceFingerprint(config.root);
   if (!force && process.env.SPACE_DEV_FORCE_BUILD !== "true" && marker && artifacts.every(existsSync) && sourceFingerprint === marker.sourceFingerprint) return;
-  console.log("[dev:stack] Building source workspaces before migrations...");
+  const buildStartedAt = Date.now();
+  console.log(`[dev:stack] Building source workspaces before migrations... started at ${new Date(buildStartedAt).toISOString()}`);
   await runner("npm", ["run", "build"], { cwd: config.root });
   await writeFile(config.buildMarker, `${JSON.stringify({ sourceFingerprint, builtAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+  console.log(`[dev:stack] Source workspace build completed at ${new Date().toISOString()} (${Math.round((Date.now() - buildStartedAt) / 1000)}s).`);
 }
 
 export async function installOpenCode(config, version) {
