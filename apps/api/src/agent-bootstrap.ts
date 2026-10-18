@@ -1,4 +1,4 @@
-import { spaceAgentCorePath, spaceMemoryIndexPath, spaceMemoryMonthlyPath } from "@space/runtime";
+import { SPACE_MEMORY_DIRECTORY, spaceAgentCorePath, spaceMemoryDirectory, spaceMemoryIndexPath, spaceMemoryMonthlyPath } from "@space/runtime";
 
 export interface SpaceAgentBootstrapInput {
   channel: "WEB_CHAT" | "CLI";
@@ -73,6 +73,8 @@ function cliAgentFilesLine(channel: SpaceAgentBootstrapInput["channel"]): string
 
 export function buildSpaceAgentBootstrapPrompt(input: SpaceAgentBootstrapInput): string {
   const memoryMonth = input.currentMemoryMonth ?? currentMemoryMonth();
+  const memoryDirectory = spaceMemoryDirectory();
+  const installedMemory = memoryDirectory === SPACE_MEMORY_DIRECTORY;
   const browserState = input.browserToolsEnabled
     ? `${input.activeBrowserSessionCount ?? 0} active managed browser session(s) are visible in this room.`
     : "Managed browser tools are disabled until Space browser runtime gates pass.";
@@ -87,15 +89,15 @@ export function buildSpaceAgentBootstrapPrompt(input: SpaceAgentBootstrapInput):
     "Space Agent Bootstrap:",
     `- Channel: ${input.channel}. Match the main Codex /etc VS Code session rules where the runtime exposes them.`,
     ...identityLines(input),
-    `- Read the compact ${spaceAgentCorePath()} core once. Load only task-relevant domain rules; read /opt/spaceapp/docs/agent_local_workspace_hygiene.md before local project/dev-server/cleanup work.`,
+    `- Read the compact ${spaceAgentCorePath()} core once. Load only task-relevant domain rules; ${installedMemory ? "read /opt/spaceapp/docs/agent_local_workspace_hygiene.md" : "follow the current source checkout's CONTRIBUTING.md"} before local project/dev-server/cleanup work.`,
     `- Canonical Space Memory: ${spaceMemoryIndexPath()} plus ${spaceMemoryMonthlyPath(memoryMonth)}.`,
-    "- Memory parity: read/search/save through the Space Memory bridge (/opt/spaceapp/bin/space-memory-recall, /opt/spaceapp/bin/space-memory-save) or Space API memory endpoints. Treat Space Memory in /opt/spaceapp/docs as canonical operational memory; Codex ad-hoc notes are fallback only.",
+    `- Memory parity: ${installedMemory ? "read/search/save through the Space Memory bridge (/opt/spaceapp/bin/space-memory-recall, /opt/spaceapp/bin/space-memory-save) or Space API memory endpoints" : "read/search/save through Space API memory endpoints; do not use an installed-instance memory bridge"}. Treat Space Memory in ${memoryDirectory} as canonical operational memory; Codex ad-hoc notes are fallback only.`,
     "- Tools: choose verified native tools first. MCP is on-demand fallback or Space-specific access, never a mandatory substitute for a capable native tool. Keep evidence and authorization requirements regardless of transport.",
     "- Images: use native vision whenever available. Vision MCP is only for verified text-only input pipelines; unknown model support requires checking capability metadata first.",
     "- Skills: load only relevant guidance when needed. Workflow skills require operator opt-in; a skill must not force an inferior tool. Do not list every skill or tool at startup.",
     input.channel === "CLI" ? "- Space-only operations: use space-capability info <server> [tool] or space-capability call with JSON on stdin when needed. No MCP catalog or server startup is required for native tasks." : null,
     agentFilesLine,
-    input.channel === "CLI" ? "- Timed or recurring work: `node /opt/spaceapp/scripts/space-task.mjs add --title T --prompt P --every 2h|--daily HH:MM|--at <time>` puts it in the operator's Tasks dock, and Space types it into this pane when due. Never use a session-only cron or timer for it." : null,
+    input.channel === "CLI" ? `- Timed or recurring work: ${installedMemory ? "`node /opt/spaceapp/scripts/space-task.mjs add --title T --prompt P --every 2h|--daily HH:MM|--at <time>` puts it in the operator's Tasks dock, and Space types it into this pane when due" : "use verified Space API task capabilities for the current source stack"}. Never use a session-only cron or timer for it.` : null,
     "- Secret policy: never write raw provider credentials, cookies, browser profile data, private keys, or unredacted tokens to docs, chat, logs, memory, or transcripts.",
     skillBridgeLine,
     mcpBridgeLine,
@@ -111,6 +113,16 @@ export function buildSpaceAgentBootstrapPrompt(input: SpaceAgentBootstrapInput):
 
 export function buildCliAgentBootstrapMarkdown(input: Omit<SpaceAgentBootstrapInput, "channel"> = {}): string {
   const memoryMonth = input.currentMemoryMonth ?? currentMemoryMonth();
+  const installedMemory = spaceMemoryDirectory() === SPACE_MEMORY_DIRECTORY;
+  const operationalWorkspace = installedMemory
+    ? `- Treat /etc as the default operational workspace for memory, infra, access, ops, and browser-facing tasks unless the user names another path.
+- This artifact folder is not the project root. If the user asks about Space, use the real target path such as /opt/spaceapp.
+- Prefer native filesystem/search/shell tools for ordinary work. Use protected Space APIs or the on-demand entrypoint for Space-specific capabilities.
+- If a task explicitly requires /etc operational memory and the CLI has filesystem access, read/write the canonical Space Memory files listed above.`
+    : `- Use the current source checkout for Space source-code tasks; do not target an installed SpaceApp instance.
+- This artifact folder is not the project root. For Space source code, use the current source checkout.
+- Prefer native filesystem/search/shell tools for ordinary work. Use protected Space APIs or the on-demand entrypoint for Space-specific capabilities.
+- Read or write canonical Space Memory only through Space API endpoints; its files are under the configured source-stack memory root listed above.`;
   return `# Space CLI Agent Bootstrap
 
 This CLI session is launched by Space. It uses a managed writable workspace only to persist the terminal session and uploads.
@@ -123,10 +135,7 @@ ${buildSpaceAgentBootstrapPrompt({
 
 Operational workspace:
 
-- Treat /etc as the default operational workspace for memory, infra, access, ops, and browser-facing tasks unless the user names another path.
-- This artifact folder is not the project root. If the user asks about Space, use the real target path such as /opt/spaceapp.
-- Prefer native filesystem/search/shell tools for ordinary work. Use protected Space APIs or the on-demand entrypoint for Space-specific capabilities.
-- If a task explicitly requires /etc operational memory and the CLI has filesystem access, read/write the canonical Space Memory files listed above.
+${operationalWorkspace}
 - Use GET /api/tasks?source=codex_goal to inspect shared Codex goals; bounded updates go through PATCH /api/tasks/codex-goals/:threadId when Space API auth is available.
 - Space sets non-secret identity environment variables for this process:
   SPACE_AGENT_CHANNEL, SPACE_ROOM_ID, SPACE_PANE_ID, SPACE_CLI_SESSION_ID, SPACE_CLI_RUNTIME_ID, and SPACE_AGENT_RUNTIME_ID.

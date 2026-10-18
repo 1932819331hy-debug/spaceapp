@@ -67,6 +67,9 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
   if (!/^[a-z0-9][a-z0-9_-]{2,50}$/i.test(project)) throw new Error("SPACE_DEV_COMPOSE_PROJECT contains unsupported characters.");
   const preferredSocket = join(stateRoot, "run", "cli-host.sock");
   const socketPath = Buffer.byteLength(preferredSocket) <= 96 ? preferredSocket : join(tmpdir(), `spaceapp-dev-${rootHash}`, "cli-host.sock");
+  if (Buffer.byteLength(socketPath) > 96) {
+    throw new Error(`Unix socket path exceeds the 96-byte limit after fallback (${Buffer.byteLength(socketPath)} bytes). Set TMPDIR to a shorter directory and retry.`);
+  }
   return {
     root, rootHash, stateRoot, project, ports, socketPath,
     composeFile: join(stateRoot, "compose.yml"),
@@ -231,8 +234,11 @@ export async function ensureTemporalNamespace(config) {
 }
 
 export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
-  const env = { ...process.env };
-  for (const key of ["OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD", "SPACE_DEV_PROCESS_TOKEN"]) delete env[key];
+  // Source services need the host's executable lookup and basic OS/temp/locale
+  // settings. Do not inherit arbitrary user variables: provider credentials
+  // have many names and a denylist inevitably misses some of them.
+  const inheritedKeys = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "TZ"]);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => inheritedKeys.has(key) || key.startsWith("LC_")));
   if (openCodeWrapper !== join(config.binDir, "opencode-vscode-parity")) {
     throw new Error("OpenCode wrapper must live inside the controlled dev-stack command directory.");
   }

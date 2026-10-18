@@ -20,7 +20,7 @@ import {
   sleep,
   sourceEnv
 } from "./dev-stack-lib.mjs";
-import { ensureDarwinNodePtySpawnHelpers, reset } from "./dev-stack.mjs";
+import { ensureDarwinNodePtySpawnHelpers, reset, spawnService } from "./dev-stack.mjs";
 import {
   assertSafeDevStackOverrides,
   claimStateOwnership,
@@ -378,6 +378,63 @@ test("defaults isolate installed SpaceApp and bind Docker ports to loopback", as
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("source services do not inherit provider or cloud credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-source-env-"));
+  const keys = ["AI_GATEWAY_API_KEY", "VERCEL_AI_GATEWAY_API_KEY", "QWEN_API_KEY", "KIMI_API_KEY", "XAI_API_KEY", "AUTOHAND_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CUSTOM_PROVIDER_CREDENTIAL"];
+  const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    for (const key of keys) process.env[key] = `sentinel-${key}`;
+    const config = await resolveConfig({}, root);
+    const env = sourceEnv(config, "postgresql://unused", "test-session-secret", join(config.binDir, "opencode-vscode-parity"));
+    for (const key of keys) assert.equal(env[key], undefined, `${key} must not cross into source services`);
+    assert.equal(env.PATH, process.env.PATH);
+    assert.equal(env.HOME, process.env.HOME);
+    assert.equal(env.SPACE_MEMORY_ROOT, config.memoryRoot);
+  } finally {
+    for (const key of keys) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects an overlong UTF-8 TMPDIR socket fallback before startup", async () => {
+  const base = await mkdtemp(join(tmpdir(), "spaceapp-socket-path-"));
+  const checkout = join(base, `checkout-${"é".repeat(35)}`);
+  const deepTmp = join(base, `temporary-${"é".repeat(35)}`);
+  const oldTmpdir = process.env.TMPDIR;
+  try {
+    await mkdir(checkout, { recursive: true });
+    await mkdir(deepTmp, { recursive: true });
+    process.env.TMPDIR = deepTmp;
+    assert.ok(Buffer.byteLength(join(checkout, "run", "cli-host.sock")) > 96);
+    await assert.rejects(() => resolveConfig({}, checkout), /Unix socket path exceeds the 96-byte limit after fallback/);
+  } finally {
+    if (oldTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmpdir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("spawn failure is handled before PID validation can interrupt cleanup", async () => {
+  const failures = [];
+  assert.throws(() => spawnService(
+    { root: process.cwd() },
+    "missing-service",
+    join(tmpdir(), `no-such-spaceapp-command-${process.pid}`),
+    [],
+    {},
+    ownership("a".repeat(10)),
+    (...args) => failures.push(args)
+  ), /Could not establish a process-group leader/);
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0][0], "missing-service");
+  assert.equal(failures[0][2], null);
+  assert.equal(failures[0][3].code, "ENOENT");
 });
 
 test("unsafe state roots and installed-instance ports fail closed", async () => {

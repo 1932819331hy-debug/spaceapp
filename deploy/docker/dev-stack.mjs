@@ -46,12 +46,13 @@ function prefixStream(stream, label, target) {
   stream.on("end", () => { if (pending) target.write(`[${label}] ${pending}\n`); });
 }
 
-function spawnService(config, name, command, args, env, ownership, onUnexpectedExit) {
+export function spawnService(config, name, command, args, env, ownership, onUnexpectedExit) {
   const child = spawnOwnedProcess(ownership, command, args, {
     cwd: config.root,
     env,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  child.once("error", (error) => onUnexpectedExit(name, child, null, error));
   if (!Number.isInteger(child.pid) || child.pid <= 1) throw new Error(`Could not establish a process-group leader for ${name}.`);
   prefixStream(child.stdout, name, process.stdout);
   prefixStream(child.stderr, name, process.stderr);
