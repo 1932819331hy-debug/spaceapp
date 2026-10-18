@@ -127,13 +127,12 @@ export async function prepareState(config) {
   await privateFile(join(config.secretsDir, "postgres-password"), randomBytes(24).toString("base64url"));
   await privateFile(join(config.secretsDir, "session-secret"), randomBytes(32).toString("hex"));
   await privateFile(join(config.secretsDir, "setup-token"), randomBytes(32).toString("hex"));
-  const password = (await readFile(join(config.secretsDir, "postgres-password"), "utf8")).trim();
+  const postgresPassword = (await readFile(join(config.secretsDir, "postgres-password"), "utf8")).trim();
   const sessionSecret = (await readFile(join(config.secretsDir, "session-secret"), "utf8")).trim();
-  process.env.SPACEAPP_DEV_POSTGRES_PASSWORD = password;
-  const databaseUrl = `postgresql://spaceapp:${encodeURIComponent(password)}@127.0.0.1:${config.ports.postgres}/spaceapp_dev`;
+  const databaseUrl = `postgresql://spaceapp:${encodeURIComponent(postgresPassword)}@127.0.0.1:${config.ports.postgres}/spaceapp_dev`;
   await writeFile(join(config.secretsDir, "database-url"), `${databaseUrl}\n`, { mode: 0o600 });
   await chmod(join(config.secretsDir, "database-url"), 0o600);
-  return { databaseUrl, sessionSecret };
+  return { databaseUrl, sessionSecret, postgresPassword };
 }
 
 async function newestMtime(path) {
