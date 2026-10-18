@@ -88,7 +88,7 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
 }
 
 export function renderCompose(config, images) {
-  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    secrets: [postgres-password]\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    entrypoint: [\"/bin/sh\", \"-ec\"]\n    command:\n      - export POSTGRES_PWD=\"$$(cat /run/secrets/postgres-password)\"; exec /etc/temporal/entrypoint.sh autosetup\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    secrets: [postgres-password]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nsecrets:\n  postgres-password:\n    file: ./secrets/postgres-password\nvolumes:\n  postgres-data:\n`;
+  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      POSTGRES_PWD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nvolumes:\n  postgres-data:\n`;
 }
 
 export async function run(command, args, { capture = false, allowFailure = false, env = process.env, cwd = repoRoot } = {}) {
@@ -129,6 +129,7 @@ export async function prepareState(config) {
   await privateFile(join(config.secretsDir, "setup-token"), randomBytes(32).toString("hex"));
   const password = (await readFile(join(config.secretsDir, "postgres-password"), "utf8")).trim();
   const sessionSecret = (await readFile(join(config.secretsDir, "session-secret"), "utf8")).trim();
+  process.env.SPACEAPP_DEV_POSTGRES_PASSWORD = password;
   const databaseUrl = `postgresql://spaceapp:${encodeURIComponent(password)}@127.0.0.1:${config.ports.postgres}/spaceapp_dev`;
   await writeFile(join(config.secretsDir, "database-url"), `${databaseUrl}\n`, { mode: 0o600 });
   await chmod(join(config.secretsDir, "database-url"), 0o600);
@@ -199,7 +200,7 @@ export async function ensureTemporalNamespace(config) {
 
 export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
   const env = { ...process.env };
-  for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]) delete env[key];
+  for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD"]) delete env[key];
   if (openCodeWrapper !== join(config.binDir, "opencode-vscode-parity")) {
     throw new Error("OpenCode wrapper must live inside the controlled dev-stack command directory.");
   }
