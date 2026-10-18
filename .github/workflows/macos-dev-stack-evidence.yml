@@ -1,0 +1,72 @@
+name: macOS dev-stack evidence
+
+on:
+  push:
+    branches:
+      - ci/macos-dev-stack-65
+
+permissions:
+  contents: read
+
+jobs:
+  macos-intel-colima:
+    name: macOS 15 Intel + Colima source stack
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install Colima and Docker CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install colima docker docker-compose
+          mkdir -p "$HOME/.docker/cli-plugins"
+          ln -sfn "$(brew --prefix docker-compose)/bin/docker-compose" "$HOME/.docker/cli-plugins/docker-compose"
+          colima start --runtime docker --cpu 2 --memory 6 --disk 20
+          docker version
+          docker compose version
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      - name: Unit-test dev-stack contracts
+        run: npm run test:dev-stack
+
+      - name: Start full stack without a TTY
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run dev:stack >"$RUNNER_TEMP/dev-stack-macos.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/dev-stack-shell.pid"
+
+      - name: Verify source stack end to end
+        run: npm run verify:dev-stack
+
+      - name: Reset and print terminal evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm run dev:stack -- down
+          down_status=$?
+          npm run dev:stack -- reset
+          reset_status=$?
+          status_json="$(npm run --silent dev:stack -- status 2>/dev/null)"
+          echo "$status_json"
+          echo "--- macOS dev-stack terminal output ---"
+          cat "$RUNNER_TEMP/dev-stack-macos.log" 2>/dev/null || true
+          colima stop || true
+          colima delete -f || true
+          if [ "$down_status" -ne 0 ] || [ "$reset_status" -ne 0 ]; then
+            exit 1
+          fi
