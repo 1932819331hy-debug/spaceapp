@@ -41,6 +41,7 @@ export async function readSupervisorRecord(config) {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
+    if (Number.isInteger(parsed)) return { pid: parsed, legacy: true };
     return Number.isInteger(parsed?.pid) ? parsed : null;
   } catch {
     const pid = Number.parseInt(raw, 10);
