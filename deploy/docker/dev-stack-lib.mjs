@@ -283,6 +283,43 @@ export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
   };
 }
 
+// The API/database is authoritative for whether the one-time setup token is
+// usable. The local secret file persists after the owner claims it and must not
+// be printed again on a normal source-stack restart.
+export async function ownerSetupBanner(config, {
+  request = fetch,
+  readSecret = readFile,
+  nowMs = Date.now()
+} = {}) {
+  const response = await request(`http://127.0.0.1:${config.ports.api}/api/setup/status`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!response?.ok) {
+    throw new Error(`Could not verify dev-stack owner setup status (HTTP ${response?.status ?? "unknown"}); refusing to print a token.`);
+  }
+  const status = await response.json();
+  if (!status || typeof status !== "object" || typeof status.setupRequired !== "boolean"
+    || (status.expiresAt !== null && typeof status.expiresAt !== "string")) {
+    throw new Error("Invalid dev-stack owner setup status; refusing to print a token.");
+  }
+  if (!status.setupRequired) {
+    return "Owner setup already complete; sign in with the existing owner account.";
+  }
+
+  const expiresAtMs = Date.parse(status.expiresAt ?? "");
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    return "Owner setup token expired or unavailable; no token will be printed. Verify the setup status before attempting first-owner setup.";
+  }
+  const token = (await readSecret(join(config.secretsDir, "setup-token"), "utf8")).trim();
+  if (!/^[a-f0-9]{64}$/.test(token)) {
+    throw new Error("Invalid dev-stack owner setup token file; refusing to print its content.");
+  }
+  return `Owner setup token: ${token}`;
+}
+
 export async function waitReady(config, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
