@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const stateRoot = resolve(process.env.SPACE_DEV_STACK_DIR || join(root, ".dev-stack"));
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+const activeCliStatuses = new Set(["IDLE", "RUNNING", "READY", "ATTACHED"]);
+const failedCliStatuses = new Set(["ERROR", "EXITED", "FAILED"]);
 
 async function waitForJson(path, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
@@ -124,11 +126,11 @@ let session = null;
 while (Date.now() < deadline) {
   const current = await request(`/api/panes/${encodeURIComponent(pane.id)}/cli/session`, { cookie });
   session = current.payload?.session ?? current.payload;
-  if (["RUNNING", "READY", "ATTACHED"].includes(session?.status)) break;
-  if (["ERROR", "EXITED", "FAILED"].includes(session?.status)) throw new Error(`OpenCode pane entered ${session.status}: ${session.statusReason || "no reason"}`);
+  if (activeCliStatuses.has(session?.status)) break;
+  if (failedCliStatuses.has(session?.status)) throw new Error(`OpenCode pane entered ${session.status}: ${session.statusReason || "no reason"}`);
   await sleep(500);
 }
-if (!session || !["RUNNING", "READY", "ATTACHED"].includes(session.status)) throw new Error(`OpenCode pane did not become active; last status=${session?.status ?? "missing"}.`);
+if (!session || !activeCliStatuses.has(session.status)) throw new Error(`OpenCode pane did not become active; last status=${session?.status ?? "missing"}.`);
 console.log(`[dev-stack-verify] PASS OpenCode pane active status=${session.status}`);
 
 const finalReady = await request("/readyz");
