@@ -90,10 +90,11 @@ keeps the state needed to retry cleanup instead of reporting success.
 
 The isolated ports can be overridden with `SPACE_DEV_API_PORT`,
 `SPACE_DEV_WEB_PORT`, `SPACE_DEV_POSTGRES_PORT`, and
-`SPACE_DEV_TEMPORAL_PORT`. `SPACE_DEV_STACK_DIR` selects another state
-directory and `SPACE_DEV_COMPOSE_PROJECT` selects another Compose project.
-The runner rejects installed-instance ports `4910` and `4911`, duplicate ports,
-unsafe state roots, and symlink state roots.
+`SPACE_DEV_TEMPORAL_PORT`. The state directory and Compose project identity are
+derived from this checkout and intentionally cannot be overridden, so lifecycle
+commands cannot target another checkout's resources. The runner also rejects
+installed-instance ports `4910` and `4911`, duplicate ports, unsafe state roots,
+and symlink state roots.
 
 For an automated end-to-end proof after the stack is ready, run:
 
