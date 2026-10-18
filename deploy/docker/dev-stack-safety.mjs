@@ -1,29 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { pidAlive, run } from "./dev-stack-lib.mjs";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { pidAlive, run, sleep } from "./dev-stack-lib.mjs";
 
 const unsafeOverrideKeys = ["SPACE_DEV_STACK_DIR", "SPACE_DEV_COMPOSE_PROJECT"];
-const ownershipFileName = ".ownership.json";
-const processFileName = ".processes.json";
-
-const ownershipFile = (config) => join(config.stateRoot, ownershipFileName);
-const processFile = (config) => join(config.stateRoot, processFileName);
-
-function isZombie(identity) {
-  return typeof identity?.state === "string" && identity.state.startsWith("Z");
-}
-
-function processGroupExists(pgid) {
-  if (process.platform === "win32" || !Number.isInteger(pgid) || pgid <= 1) return false;
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
+const ownershipVersion = 1;
+const processRecordVersion = 1;
 
 export function assertSafeDevStackOverrides(env = process.env) {
   for (const key of unsafeOverrideKeys) {
@@ -33,63 +15,52 @@ export function assertSafeDevStackOverrides(env = process.env) {
   }
 }
 
-export async function readStateOwnership(config) {
-  const path = ownershipFile(config);
-  if (!existsSync(path)) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse((await readFile(path, "utf8")).trim());
-  } catch {
-    throw new Error("Dev-stack ownership record is corrupt; refusing destructive lifecycle operations.");
+function validateOwnership(config, record) {
+  if (!record || record.version !== ownershipVersion || record.rootHash !== config.rootHash || !/^[a-f0-9]{48}$/.test(record.token || "")) {
+    throw new Error("The dev-stack ownership record is missing, damaged, or belongs to another checkout; refusing destructive lifecycle operations.");
   }
-  if (parsed?.version !== 1 || parsed.rootHash !== config.rootHash || parsed.project !== config.project || typeof parsed.createdStateRoot !== "boolean") {
-    throw new Error("Dev-stack ownership record does not match this checkout; refusing destructive lifecycle operations.");
-  }
-  return parsed;
+  return record;
 }
 
-export async function assertOwnedState(config, { allowMissing = false } = {}) {
-  if (!existsSync(config.stateRoot)) {
+export async function readStateOwnership(config, { allowMissing = false } = {}) {
+  if (!existsSync(config.stateRoot)) return null;
+  if (!existsSync(config.ownerFile)) {
     if (allowMissing) return null;
-    throw new Error("Dev-stack state directory is missing; ownership cannot be proven.");
+    throw new Error(`Refusing to adopt pre-existing state directory ${config.stateRoot}: it was not initialized by this dev-stack.`);
   }
-  const info = await lstat(config.stateRoot);
-  if (info.isSymbolicLink() || !info.isDirectory()) {
-    throw new Error("Dev-stack state path is not an owned directory; refusing lifecycle operations.");
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(config.ownerFile, "utf8"));
+  } catch {
+    throw new Error("The dev-stack ownership record is unreadable; refusing cleanup so recovery material is preserved.");
   }
-  const record = await readStateOwnership(config);
-  if (!record) throw new Error("Existing .dev-stack directory is not owned by dev:stack; refusing to modify or remove it.");
-  return record;
+  return validateOwnership(config, parsed);
 }
 
 export async function claimStateOwnership(config) {
-  const existed = existsSync(config.stateRoot);
-  if (existed) {
-    const info = await lstat(config.stateRoot);
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("Existing .dev-stack path is not a safe directory.");
-    const existing = await readStateOwnership(config);
-    if (existing) return existing;
-    const entries = await readdir(config.stateRoot);
-    if (entries.length) {
-      throw new Error("Existing .dev-stack directory was not initialized by dev:stack and is not empty; refusing to take ownership.");
-    }
-  } else {
-    await mkdir(config.stateRoot, { recursive: false, mode: 0o700 });
-  }
+  if (existsSync(config.stateRoot)) return readStateOwnership(config);
 
-  const record = {
-    version: 1,
-    rootHash: config.rootHash,
-    project: config.project,
-    createdStateRoot: !existed
-  };
+  let created = false;
   try {
-    await writeFile(ownershipFile(config), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await mkdir(config.stateRoot, { mode: 0o700 });
+    created = true;
+    const record = {
+      version: ownershipVersion,
+      rootHash: config.rootHash,
+      token: randomBytes(24).toString("hex")
+    };
+    await writeFile(config.ownerFile, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+    await chmod(config.ownerFile, 0o600);
+    return record;
   } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    return assertOwnedState(config);
+    if (created) await rm(config.stateRoot, { recursive: true, force: true }).catch(() => {});
+    if (error?.code === "EEXIST") return readStateOwnership(config);
+    throw error;
   }
-  return record;
+}
+
+function isZombie(identity) {
+  return typeof identity?.state === "string" && identity.state.startsWith("Z");
 }
 
 async function psField(pid, field) {
@@ -100,15 +71,13 @@ async function psField(pid, field) {
 
 export async function processIdentity(pid) {
   if (!pidAlive(pid)) return null;
-  const [startedAt, args, state, pgidRaw] = await Promise.all([
+  const [startedAt, args, state] = await Promise.all([
     psField(pid, "lstart"),
     psField(pid, "args"),
-    psField(pid, "stat"),
-    psField(pid, "pgid")
+    psField(pid, "stat")
   ]);
-  const pgid = Number.parseInt(pgidRaw || "", 10);
-  if (!startedAt || !args || !state || !Number.isInteger(pgid)) return null;
-  return { startedAt, args, state, pgid };
+  if (!startedAt || !args || !state) return null;
+  return { startedAt, args, state };
 }
 
 export function supervisorRecordMatches(config, record, identity) {
@@ -192,73 +161,117 @@ export async function releaseSupervisor(config, pid = process.pid) {
   if (record?.pid === pid) await rm(config.pidFile, { force: true });
 }
 
-export function managedProcessRecordMatches(config, record, identity) {
-  if (!record || !identity) return false;
-  if (!Number.isInteger(record.pid) || record.pid <= 1 || !Number.isInteger(record.pgid) || record.pgid <= 1) return false;
-  return record.rootHash === config.rootHash
-    && record.pid === record.pgid
-    && identity.pgid === record.pgid
-    && record.startedAt === identity.startedAt
-    && record.args === identity.args;
+function validateProcessRecord(record) {
+  if (!record || typeof record.name !== "string" || !Number.isInteger(record.pid) || record.pid <= 1 || record.pgid !== record.pid || record.sid !== record.pid) {
+    throw new Error("Invalid persisted dev-stack process-group record; refusing to signal it.");
+  }
+  return record;
 }
 
-export async function readManagedProcessRecords(config) {
-  const path = processFile(config);
-  if (!existsSync(path)) return [];
+export async function writeProcessRecords(config, ownership, records) {
+  validateOwnership(config, ownership);
+  const normalized = records.map(validateProcessRecord);
+  const payload = {
+    version: processRecordVersion,
+    rootHash: config.rootHash,
+    token: ownership.token,
+    groups: normalized
+  };
+  const temporary = `${config.processFile}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, config.processFile);
+}
+
+export async function readProcessRecords(config, ownership) {
+  validateOwnership(config, ownership);
+  if (!existsSync(config.processFile)) return [];
   let parsed;
   try {
-    parsed = JSON.parse((await readFile(path, "utf8")).trim());
+    parsed = JSON.parse(await readFile(config.processFile, "utf8"));
   } catch {
-    throw new Error("Dev-stack managed-process record is corrupt; refusing to signal recorded PIDs.");
+    throw new Error("The dev-stack process ownership record is unreadable; refusing to signal any process.");
   }
-  if (parsed?.version !== 1 || parsed.rootHash !== config.rootHash || !Array.isArray(parsed.processes)) {
-    throw new Error("Dev-stack managed-process record does not belong to this checkout.");
+  if (parsed?.version !== processRecordVersion || parsed.rootHash !== config.rootHash || parsed.token !== ownership.token || !Array.isArray(parsed.groups)) {
+    throw new Error("The dev-stack process ownership record does not match this state; refusing to signal any process.");
   }
-  return parsed.processes;
+  return parsed.groups.map(validateProcessRecord);
 }
 
-export async function writeManagedProcessRecords(config, processes) {
-  const path = processFile(config);
-  if (!processes.length) {
-    await rm(path, { force: true });
-    return;
-  }
-  await writeFile(path, `${JSON.stringify({ version: 1, rootHash: config.rootHash, processes }, null, 2)}\n`, { mode: 0o600 });
+export async function clearProcessRecords(config) {
+  await rm(config.processFile, { force: true });
 }
 
-export async function ownedManagedProcessRecords(config, { strict = true, identityProvider = processIdentity } = {}) {
-  const records = await readManagedProcessRecords(config);
-  const owned = [];
-  let changed = false;
-  for (const record of records) {
-    if (!Number.isInteger(record.pid) || record.pid <= 1 || record.pid !== record.pgid || record.rootHash !== config.rootHash) {
-      if (strict) throw new Error("Refusing to use an invalid managed-process ownership record.");
-      continue;
+async function listGroupMembers(record, runner = run) {
+  const result = await runner("ps", ["-axo", "pid=,pgid=,sid=,stat="], { capture: true, allowFailure: true });
+  if (result.code !== 0) throw new Error("Could not inventory local processes; refusing to signal a dev-stack process group.");
+  const members = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const pgid = Number(match[2]);
+    const sid = Number(match[3]);
+    const stat = match[4];
+    if (pgid === record.pgid && sid === record.sid && !stat.startsWith("Z")) members.push({ pid, stat });
+  }
+  return members;
+}
+
+async function processHasToken(pid, token, runner = run) {
+  const result = await runner("ps", ["eww", "-p", String(pid), "-o", "command="], { capture: true, allowFailure: true });
+  if (result.code !== 0 || !result.stdout) return false;
+  return result.stdout.includes(`SPACE_DEV_PROCESS_TOKEN=${token}`);
+}
+
+async function verifiedGroupMembers(record, ownership, runner = run) {
+  const members = await listGroupMembers(record, runner);
+  for (const member of members) {
+    if (!await processHasToken(member.pid, ownership.token, runner)) {
+      throw new Error(`Refusing to signal process group ${record.pgid}: PID ${member.pid} does not carry this dev-stack ownership token.`);
     }
+  }
+  return members;
+}
 
-    if (!pidAlive(record.pid)) {
-      if (processGroupExists(record.pgid)) {
-        // A POSIX process group cannot be replaced by a new group with the same PGID while
-        // descendants of the recorded group still exist. With the original leader PID absent,
-        // this is the only safe case where we may recover the recorded descendants by PGID.
-        owned.push({ ...record, leaderExited: true });
-      } else {
-        changed = true;
+async function signalVerifiedGroup(record, ownership, signal, runner, signaler) {
+  const members = await verifiedGroupMembers(record, ownership, runner);
+  if (!members.length) return false;
+  try {
+    if (process.platform === "win32") {
+      for (const member of members) signaler(member.pid, signal);
+    } else {
+      signaler(-record.pgid, signal);
+    }
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  return true;
+}
+
+export async function terminateOwnedProcessGroups(config, ownership, {
+  records = null,
+  timeoutMs = 7000,
+  runner = run,
+  signaler = process.kill
+} = {}) {
+  validateOwnership(config, ownership);
+  const groups = (records ?? await readProcessRecords(config, ownership)).map(validateProcessRecord);
+  for (const record of groups) {
+    if (!await signalVerifiedGroup(record, ownership, "SIGTERM", runner, signaler)) continue;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!(await verifiedGroupMembers(record, ownership, runner)).length) break;
+      await sleep(100);
+    }
+    if ((await verifiedGroupMembers(record, ownership, runner)).length) {
+      await signalVerifiedGroup(record, ownership, "SIGKILL", runner, signaler);
+      const killDeadline = Date.now() + 2000;
+      while (Date.now() < killDeadline && (await verifiedGroupMembers(record, ownership, runner)).length) await sleep(50);
+      if ((await verifiedGroupMembers(record, ownership, runner)).length) {
+        throw new Error(`Owned process group ${record.pgid} did not terminate; process ownership state was preserved for retry.`);
       }
-      continue;
     }
-
-    const identity = await identityProvider(record.pid);
-    if (!identity) {
-      if (strict) throw new Error(`Refusing to signal PID ${record.pid}: process identity could not be established.`);
-      continue;
-    }
-    if (!managedProcessRecordMatches(config, record, identity)) {
-      if (strict) throw new Error(`Refusing to signal PID ${record.pid}: managed-process identity no longer matches the recorded dev-stack service.`);
-      continue;
-    }
-    owned.push(record);
   }
-  if (changed) await writeManagedProcessRecords(config, owned);
-  return owned;
+  if (records == null) await clearProcessRecords(config);
 }

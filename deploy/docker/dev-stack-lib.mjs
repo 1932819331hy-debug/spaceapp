@@ -71,7 +71,9 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
     root, rootHash, stateRoot, project, ports, socketPath,
     composeFile: join(stateRoot, "compose.yml"),
     configFile: join(stateRoot, "config.json"),
+    ownerFile: join(stateRoot, "ownership.json"),
     pidFile: join(stateRoot, "supervisor.pid"),
+    processFile: join(stateRoot, "process-groups.json"),
     buildMarker: join(stateRoot, "build-marker.json"),
     secretsDir: join(stateRoot, "secrets"),
     binDir: join(stateRoot, "bin"),
@@ -87,8 +89,10 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
   };
 }
 
-export function renderCompose(config, images) {
-  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      POSTGRES_PWD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nvolumes:\n  postgres-data:\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\nnetworks:\n  default:\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n`;
+export function renderCompose(config, images, ownership) {
+  if (!ownership?.token) throw new Error("Dev-stack ownership token is required to render Compose resources.");
+  const ownerLabel = `com.spaceapp.dev-stack.owner: ${ownership.token}`;
+  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    labels:\n      ${ownerLabel}\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    labels:\n      ${ownerLabel}\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      POSTGRES_PWD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nvolumes:\n  postgres-data:\n    labels:\n      ${ownerLabel}\nnetworks:\n  default:\n    labels:\n      ${ownerLabel}\n`;
 }
 
 export async function run(command, args, { capture = false, allowFailure = false, env = process.env, cwd = repoRoot } = {}) {
@@ -217,7 +221,7 @@ export async function ensureTemporalNamespace(config) {
 
 export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
   const env = { ...process.env };
-  for (const key of ["OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD"]) delete env[key];
+  for (const key of ["OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD", "SPACE_DEV_PROCESS_TOKEN"]) delete env[key];
   if (openCodeWrapper !== join(config.binDir, "opencode-vscode-parity")) {
     throw new Error("OpenCode wrapper must live inside the controlled dev-stack command directory.");
   }
@@ -288,35 +292,39 @@ export async function readSupervisorPid(config) {
   return Number.isInteger(value) ? value : null;
 }
 
-function splitResourceIds(value) {
+function splitLines(value) {
   return value.split(/\s+/).filter(Boolean);
 }
 
-function sameResources(all, owned) {
-  if (all.length !== owned.length) return false;
-  const set = new Set(owned);
-  return all.every((value) => set.has(value));
+async function dockerList(runner, args, kind) {
+  const result = await runner("docker", args, { capture: true, allowFailure: true });
+  if (result.code !== 0) throw new Error(`Docker inventory failed while listing dev-stack ${kind}; state was preserved for recovery.`);
+  return splitLines(result.stdout);
 }
 
-export async function dockerResources(config, runner = run) {
+function sameSet(left, right) {
+  return left.length === right.length && [...left].sort().every((value, index) => value === [...right].sort()[index]);
+}
+
+export async function dockerResources(config, ownership = null, runner = run) {
   const projectFilter = `label=com.docker.compose.project=${config.project}`;
-  const ownerFilter = `label=com.spaceapp.dev-stack.owner=${config.rootHash}`;
-  const [containersResult, ownedContainersResult, volumesResult, ownedVolumesResult, networksResult, ownedNetworksResult] = await Promise.all([
-    runner("docker", ["ps", "-aq", "--filter", projectFilter], { capture: true }),
-    runner("docker", ["ps", "-aq", "--filter", projectFilter, "--filter", ownerFilter], { capture: true }),
-    runner("docker", ["volume", "ls", "-q", "--filter", projectFilter], { capture: true }),
-    runner("docker", ["volume", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], { capture: true }),
-    runner("docker", ["network", "ls", "-q", "--filter", projectFilter], { capture: true }),
-    runner("docker", ["network", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], { capture: true })
-  ]);
-  const containers = splitResourceIds(containersResult.stdout);
-  const ownedContainers = splitResourceIds(ownedContainersResult.stdout);
-  const volumes = splitResourceIds(volumesResult.stdout);
-  const ownedVolumes = splitResourceIds(ownedVolumesResult.stdout);
-  const networks = splitResourceIds(networksResult.stdout);
-  const ownedNetworks = splitResourceIds(ownedNetworksResult.stdout);
-  if (!sameResources(containers, ownedContainers) || !sameResources(volumes, ownedVolumes) || !sameResources(networks, ownedNetworks)) {
-    throw new Error(`Docker project ${config.project} contains resources without this checkout's ownership label; refusing destructive cleanup.`);
+  const all = {
+    containers: await dockerList(runner, ["ps", "-aq", "--filter", projectFilter], "containers"),
+    volumes: await dockerList(runner, ["volume", "ls", "-q", "--filter", projectFilter], "volumes"),
+    networks: await dockerList(runner, ["network", "ls", "-q", "--filter", projectFilter], "networks")
+  };
+  if (!ownership) return all;
+
+  const ownerFilter = `label=com.spaceapp.dev-stack.owner=${ownership.token}`;
+  const owned = {
+    containers: await dockerList(runner, ["ps", "-aq", "--filter", projectFilter, "--filter", ownerFilter], "owned containers"),
+    volumes: await dockerList(runner, ["volume", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], "owned volumes"),
+    networks: await dockerList(runner, ["network", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], "owned networks")
+  };
+  for (const kind of ["containers", "volumes", "networks"]) {
+    if (!sameSet(all[kind], owned[kind])) {
+      throw new Error(`Refusing cleanup: Compose project ${config.project} contains ${kind} that are not proven to belong to this dev-stack state.`);
+    }
   }
-  return { containers: ownedContainers, volumes: ownedVolumes, networks: ownedNetworks };
+  return owned;
 }

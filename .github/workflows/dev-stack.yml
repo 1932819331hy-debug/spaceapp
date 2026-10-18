@@ -57,6 +57,48 @@ jobs:
       - name: Verify readiness, owner setup, and OpenCode pane
         run: npm run verify:dev-stack
 
+      - name: Verify a running shared-package rebuild
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          probe="dev_stack_rebuild_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          before_pid="$(node -e 'const fs=require("node:fs"); process.stdout.write(String(JSON.parse(fs.readFileSync(".dev-stack/supervisor.pid","utf8")).pid))')"
+          printf '\nexport const __devStackRebuildProbe = "%s";\n' "$probe" >> packages/contracts/src/index.ts
+
+          npm run dev:stack -- rebuild
+
+          rebuilt=0
+          for attempt in $(seq 1 240); do
+            ready=0
+            if curl -fsS "http://127.0.0.1:5910/readyz" | node -e '
+              let input="";
+              process.stdin.on("data", (chunk) => { input += chunk; });
+              process.stdin.on("end", () => {
+                try {
+                  const body = JSON.parse(input);
+                  process.exit(body.ok === true && body.dependencies?.database === "RUNNING" && body.dependencies?.worker === "RUNNING" && body.dependencies?.cliHost === "RUNNING" ? 0 : 1);
+                } catch { process.exit(1); }
+              });
+            '; then
+              ready=1
+            fi
+            if grep -Fq "$probe" packages/contracts/dist/index.js && [ "$ready" -eq 1 ] && grep -Fq "Rebuild complete; source services are ready." "$RUNNER_TEMP/dev-stack.log"; then
+              rebuilt=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$rebuilt" -ne 1 ]; then
+            echo "shared-package rebuild did not become observable in the running stack" >&2
+            tail -200 "$RUNNER_TEMP/dev-stack.log" >&2 || true
+            exit 1
+          fi
+          after_pid="$(node -e 'const fs=require("node:fs"); process.stdout.write(String(JSON.parse(fs.readFileSync(".dev-stack/supervisor.pid","utf8")).pid))')"
+          test "$before_pid" = "$after_pid"
+          echo "shared-package rebuild was picked up by supervisor $after_pid"
+
       - name: Stop and reset owned resources
         if: always()
         shell: bash
