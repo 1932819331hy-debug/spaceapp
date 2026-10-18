@@ -74,6 +74,29 @@ async function waitSupervisorExit(pid, timeoutMs = 15_000) {
   if (pidAlive(pid)) throw new Error(`Dev-stack supervisor ${pid} did not stop cleanly.`);
 }
 
+async function waitServiceHealthyWithDiagnostics(config, service, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = "missing";
+  while (Date.now() < deadline) {
+    const id = (await compose(config, ["ps", "-q", service], { capture: true })).stdout;
+    if (id) {
+      const status = await run("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", id], {
+        capture: true,
+        allowFailure: true
+      });
+      lastStatus = status.stdout || `inspect-exit-${status.code}`;
+      if (lastStatus === "healthy") return;
+      if (["exited", "dead"].includes(lastStatus)) break;
+    }
+    await sleep(1000);
+  }
+
+  const logs = await compose(config, ["logs", "--no-color", "--tail", "200", service], { capture: true, allowFailure: true });
+  const diagnostic = [logs.stdout, logs.stderr].filter(Boolean).join("\n");
+  if (diagnostic) process.stderr.write(`[dev:stack] ${service} diagnostic logs:\n${diagnostic}\n`);
+  throw new Error(`${service} did not become healthy within ${Math.round(timeoutMs / 1000)} seconds; last status=${lastStatus}.`);
+}
+
 export async function down(config) {
   const pid = await readSupervisorPid(config);
   if (pid && pid !== process.pid && pidAlive(pid)) {
@@ -205,7 +228,10 @@ export async function start(config) {
   try {
     console.log(`[dev:stack] Starting digest-pinned PostgreSQL and Temporal (${config.project})...`);
     await compose(config, ["up", "-d", "postgres", "temporal"]);
-    await Promise.all([waitHealthy(config, "postgres"), waitHealthy(config, "temporal")]);
+    await Promise.all([
+      waitHealthy(config, "postgres"),
+      waitServiceHealthyWithDiagnostics(config, "temporal", 240_000)
+    ]);
     await ensureTemporalNamespace(config);
     await ensureBuild(config);
     console.log("[dev:stack] Applying database migrations...");
