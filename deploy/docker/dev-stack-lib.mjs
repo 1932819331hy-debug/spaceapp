@@ -200,6 +200,9 @@ export async function ensureTemporalNamespace(config) {
 export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
   const env = { ...process.env };
   for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]) delete env[key];
+  if (openCodeWrapper !== join(config.binDir, "opencode-vscode-parity")) {
+    throw new Error("OpenCode wrapper must live inside the controlled dev-stack command directory.");
+  }
   return {
     ...env,
     SPACE_INSTANCE: "dev",
@@ -224,7 +227,7 @@ export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
     SPACE_CLI_ENABLED: "true",
     SPACE_CLI_HOST_SOCKET: config.socketPath,
     SPACE_CLI_COMMAND_PATH: config.binDir,
-    SPACE_CLI_OPENCODE_COMMAND: openCodeWrapper,
+    SPACE_CLI_OPENCODE_COMMAND: "opencode-vscode-parity",
     SPACE_CLI_WORKSPACE_ROOT: config.workspacesRoot,
     SPACE_CLI_ROOT_ENABLED: "false",
     SPACE_BROWSER_SESSIONS_ENABLED: "false",
