@@ -88,7 +88,7 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
 }
 
 export function renderCompose(config, images) {
-  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      POSTGRES_PWD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nvolumes:\n  postgres-data:\n`;
+  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      POSTGRES_PWD: \${SPACEAPP_DEV_POSTGRES_PASSWORD:-dev-stack-password-not-supplied}\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nvolumes:\n  postgres-data:\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\nnetworks:\n  default:\n    labels:\n      com.spaceapp.dev-stack.owner: "${config.rootHash}"\n`;
 }
 
 export async function run(command, args, { capture = false, allowFailure = false, env = process.env, cwd = repoRoot } = {}) {
@@ -270,8 +270,35 @@ export async function readSupervisorPid(config) {
   return Number.isInteger(value) ? value : null;
 }
 
-export async function dockerResources(config) {
-  const containers = await run("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${config.project}`], { capture: true, allowFailure: true });
-  const volumes = await run("docker", ["volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${config.project}`], { capture: true, allowFailure: true });
-  return { containers: containers.stdout.split(/\s+/).filter(Boolean), volumes: volumes.stdout.split(/\s+/).filter(Boolean) };
+function splitResourceIds(value) {
+  return value.split(/\s+/).filter(Boolean);
+}
+
+function sameResources(all, owned) {
+  if (all.length !== owned.length) return false;
+  const set = new Set(owned);
+  return all.every((value) => set.has(value));
+}
+
+export async function dockerResources(config, runner = run) {
+  const projectFilter = `label=com.docker.compose.project=${config.project}`;
+  const ownerFilter = `label=com.spaceapp.dev-stack.owner=${config.rootHash}`;
+  const [containersResult, ownedContainersResult, volumesResult, ownedVolumesResult, networksResult, ownedNetworksResult] = await Promise.all([
+    runner("docker", ["ps", "-aq", "--filter", projectFilter], { capture: true }),
+    runner("docker", ["ps", "-aq", "--filter", projectFilter, "--filter", ownerFilter], { capture: true }),
+    runner("docker", ["volume", "ls", "-q", "--filter", projectFilter], { capture: true }),
+    runner("docker", ["volume", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], { capture: true }),
+    runner("docker", ["network", "ls", "-q", "--filter", projectFilter], { capture: true }),
+    runner("docker", ["network", "ls", "-q", "--filter", projectFilter, "--filter", ownerFilter], { capture: true })
+  ]);
+  const containers = splitResourceIds(containersResult.stdout);
+  const ownedContainers = splitResourceIds(ownedContainersResult.stdout);
+  const volumes = splitResourceIds(volumesResult.stdout);
+  const ownedVolumes = splitResourceIds(ownedVolumesResult.stdout);
+  const networks = splitResourceIds(networksResult.stdout);
+  const ownedNetworks = splitResourceIds(ownedNetworksResult.stdout);
+  if (!sameResources(containers, ownedContainers) || !sameResources(volumes, ownedVolumes) || !sameResources(networks, ownedNetworks)) {
+    throw new Error(`Docker project ${config.project} contains resources without this checkout's ownership label; refusing destructive cleanup.`);
+  }
+  return { containers: ownedContainers, volumes: ownedVolumes, networks: ownedNetworks };
 }
