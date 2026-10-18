@@ -62,15 +62,26 @@ const ready = await waitReady();
 console.log(`[dev-stack-verify] PASS readiness database=${ready.dependencies.database} worker=${ready.dependencies.worker} cliHost=${ready.dependencies.cliHost}`);
 
 const setupToken = (await readFile(join(stateRoot, "secrets", "setup-token"), "utf8")).trim();
+const email = "dev-stack-ci@example.com";
+const password = "dev-stack-ci-password-42!";
 const claimed = await request("/api/setup/claim", {
   method: "POST",
-  body: { token: setupToken, email: "dev-stack-ci@example.com", password: "dev-stack-ci-password-42!" }
+  body: { token: setupToken, email, password }
 });
-const cookie = firstCookie(claimed.response);
-if (!cookie) throw new Error("Owner setup succeeded without returning a session cookie.");
 const starterRoomId = claimed.payload?.starterRoomId;
 if (typeof starterRoomId !== "string" || !starterRoomId.startsWith("room:")) throw new Error("Owner setup did not return the Getting Started room id.");
+if (!firstCookie(claimed.response)) throw new Error("Owner setup succeeded without returning a session cookie.");
 console.log(`[dev-stack-verify] PASS owner setup starterRoom=${starterRoomId}`);
+
+const login = await request("/api/auth/login", {
+  method: "POST",
+  body: { email, password }
+});
+const cookie = firstCookie(login.response);
+if (!cookie || login.payload?.isAuthenticated !== true || login.payload?.user?.role !== "ADMIN") {
+  throw new Error("The owner created by setup could not sign in with its configured credentials.");
+}
+console.log("[dev-stack-verify] PASS owner credentials sign in through /api/auth/login");
 
 const csrfResponse = await request("/api/auth/csrf", { cookie });
 const csrf = csrfResponse.payload?.csrfToken;
