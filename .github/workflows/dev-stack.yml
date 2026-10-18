@@ -66,8 +66,38 @@ jobs:
           down_status=$?
           npm run dev:stack -- reset
           reset_status=$?
+
+          shell_pid="$(cat "$RUNNER_TEMP/dev-stack-shell.pid" 2>/dev/null || true)"
+          for _ in $(seq 1 50); do
+            if [ -z "$shell_pid" ] || ! kill -0 "$shell_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          process_status=0
+          if [ -n "$shell_pid" ] && kill -0 "$shell_pid" 2>/dev/null; then
+            echo "dev-stack launcher process $shell_pid is still alive after reset" >&2
+            process_status=1
+            kill "$shell_pid" 2>/dev/null || true
+          fi
+
+          status_json="$(npm run --silent dev:stack -- status 2>/dev/null)"
+          echo "$status_json"
+          if echo "$status_json" | grep -q '"running": true'; then
+            echo "dev-stack supervisor still reports running after reset" >&2
+            process_status=1
+          fi
+          if ! echo "$status_json" | grep -q '"containers": \[\]'; then
+            echo "dev-stack containers remain after reset" >&2
+            process_status=1
+          fi
+          if ! echo "$status_json" | grep -q '"volumes": \[\]'; then
+            echo "dev-stack volumes remain after reset" >&2
+            process_status=1
+          fi
+
           echo "--- dev-stack log ---"
           cat "$RUNNER_TEMP/dev-stack.log" 2>/dev/null || true
-          if [ "$down_status" -ne 0 ] || [ "$reset_status" -ne 0 ]; then
+          if [ "$down_status" -ne 0 ] || [ "$reset_status" -ne 0 ] || [ "$process_status" -ne 0 ]; then
             exit 1
           fi
