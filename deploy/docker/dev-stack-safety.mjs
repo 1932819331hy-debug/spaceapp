@@ -14,6 +14,17 @@ function isZombie(identity) {
   return typeof identity?.state === "string" && identity.state.startsWith("Z");
 }
 
+function processGroupExists(pgid) {
+  if (process.platform === "win32" || !Number.isInteger(pgid) || pgid <= 1) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
 export function assertSafeDevStackOverrides(env = process.env) {
   for (const key of unsafeOverrideKeys) {
     if (env[key] != null && env[key] !== "") {
@@ -220,10 +231,23 @@ export async function ownedManagedProcessRecords(config, { strict = true, identi
   const owned = [];
   let changed = false;
   for (const record of records) {
-    if (!pidAlive(record.pid)) {
-      changed = true;
+    if (!Number.isInteger(record.pid) || record.pid <= 1 || record.pid !== record.pgid || record.rootHash !== config.rootHash) {
+      if (strict) throw new Error("Refusing to use an invalid managed-process ownership record.");
       continue;
     }
+
+    if (!pidAlive(record.pid)) {
+      if (processGroupExists(record.pgid)) {
+        // A POSIX process group cannot be replaced by a new group with the same PGID while
+        // descendants of the recorded group still exist. With the original leader PID absent,
+        // this is the only safe case where we may recover the recorded descendants by PGID.
+        owned.push({ ...record, leaderExited: true });
+      } else {
+        changed = true;
+      }
+      continue;
+    }
+
     const identity = await identityProvider(record.pid);
     if (!identity) {
       if (strict) throw new Error(`Refusing to signal PID ${record.pid}: process identity could not be established.`);
