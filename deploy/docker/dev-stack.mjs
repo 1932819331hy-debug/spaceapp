@@ -9,6 +9,7 @@ import {
   ensureBuild,
   ensureTemporalNamespace,
   installOpenCode,
+  ownerSetupBanner,
   parseOpenCodeVersion,
   parsePinnedImages,
   prepareState,
@@ -410,12 +411,12 @@ export async function start(config) {
     await run("npm", ["run", "db:migrate"], { cwd: config.root, env: { ...process.env, SPACE_DATABASE_URL: databaseUrl } });
     await spawnChildren(false, runtimeState);
     await waitReady(config);
-    const setupToken = (await readFile(resolve(config.secretsDir, "setup-token"), "utf8")).trim();
+    const setupBanner = await ownerSetupBanner(config);
     console.log("\n============================================================");
     console.log("SpaceApp dev stack is READY");
     console.log(`Web:   http://127.0.0.1:${config.ports.web}`);
     console.log(`API:   http://127.0.0.1:${config.ports.api}`);
-    console.log(`Owner setup token: ${setupToken}`);
+    console.log(setupBanner);
     console.log("Package changes: npm run dev:stack -- rebuild");
     console.log("Stop: npm run dev:stack -- down | Reset: npm run dev:stack -- reset");
     console.log("============================================================\n");
