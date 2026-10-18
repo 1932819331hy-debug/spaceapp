@@ -107,6 +107,10 @@ test("supervisor identity rejects PID reuse and atomically claims a checkout", a
 
     const reusedIdentity = async () => ({ startedAt: "Sun Oct 18 07:41:00 2026", args: "node unrelated-tool.mjs" });
     await assert.rejects(() => ownedSupervisorPid(config, { identityProvider: reusedIdentity }), /Refusing to signal PID/);
+
+    await releaseSupervisor(config, process.pid);
+    await writeFile(config.pidFile, `${process.pid}\n`, { mode: 0o600 });
+    await assert.rejects(() => claimSupervisor(config, ownedIdentity), /stale or unverified/);
   } finally {
     await releaseSupervisor(config, process.pid).catch(() => {});
     await rm(root, { recursive: true, force: true });
