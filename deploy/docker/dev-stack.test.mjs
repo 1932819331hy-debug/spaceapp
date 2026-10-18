@@ -39,18 +39,28 @@ test("defaults isolate installed SpaceApp and bind Docker ports to loopback", as
       temporal: `temporalio/auto-setup:1.29.1@sha256:${"d".repeat(64)}`
     });
     for (const port of [config.ports.postgres, config.ports.temporal]) assert.match(compose, new RegExp(`127\\.0\\.0\\.1:${port}:`));
-    assert.match(compose, /POSTGRES_PASSWORD_FILE: \/run\/secrets\/postgres-password/);
+    assert.match(compose, /POSTGRES_PASSWORD: \$\{SPACEAPP_DEV_POSTGRES_PASSWORD/);
+    assert.match(compose, /POSTGRES_PWD: \$\{SPACEAPP_DEV_POSTGRES_PASSWORD/);
+    assert.doesNotMatch(compose, /\/run\/secrets\/postgres-password|secrets:\s*\[postgres-password\]/);
     assert.match(compose, /condition: service_healthy/);
     assert.match(compose, /temporal operator cluster health --address temporal:7233/);
 
     const wrapper = join(config.binDir, "opencode-vscode-parity");
-    const env = sourceEnv(config, "postgresql://spaceapp:test@127.0.0.1:55432/spaceapp_dev", "session-secret-with-enough-length", wrapper);
-    assert.equal(env.SPACE_CLI_COMMAND_PATH, config.binDir);
-    assert.equal(env.SPACE_CLI_OPENCODE_COMMAND, "opencode-vscode-parity");
-    assert.equal(env.SPACE_DEV_LOGIN, "false");
-    assert.equal(env.SPACE_API_HOST, "127.0.0.1");
-    assert.equal(env.SPACE_WEB_HOST, "127.0.0.1");
-    assert.throws(() => sourceEnv(config, "postgresql://x", "session-secret-with-enough-length", "/tmp/opencode-vscode-parity"), /controlled dev-stack command directory/);
+    const oldComposePassword = process.env.SPACEAPP_DEV_POSTGRES_PASSWORD;
+    process.env.SPACEAPP_DEV_POSTGRES_PASSWORD = "compose-only-secret";
+    try {
+      const env = sourceEnv(config, "postgresql://spaceapp:test@127.0.0.1:55432/spaceapp_dev", "session-secret-with-enough-length", wrapper);
+      assert.equal(env.SPACE_CLI_COMMAND_PATH, config.binDir);
+      assert.equal(env.SPACE_CLI_OPENCODE_COMMAND, "opencode-vscode-parity");
+      assert.equal(env.SPACE_DEV_LOGIN, "false");
+      assert.equal(env.SPACE_API_HOST, "127.0.0.1");
+      assert.equal(env.SPACE_WEB_HOST, "127.0.0.1");
+      assert.equal(env.SPACEAPP_DEV_POSTGRES_PASSWORD, undefined);
+      assert.throws(() => sourceEnv(config, "postgresql://x", "session-secret-with-enough-length", "/tmp/opencode-vscode-parity"), /controlled dev-stack command directory/);
+    } finally {
+      if (oldComposePassword === undefined) delete process.env.SPACEAPP_DEV_POSTGRES_PASSWORD;
+      else process.env.SPACEAPP_DEV_POSTGRES_PASSWORD = oldComposePassword;
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
