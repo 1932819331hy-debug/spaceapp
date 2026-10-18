@@ -105,10 +105,26 @@ That proof performs normal owner setup, points the Getting Started room at the
 current checkout rather than `/opt/spaceapp`, starts its OpenCode terminal pane
 through the real CLI host, requires an active CLI session status, and verifies
 that the stack remains ready. The dedicated GitHub Actions workflow runs this
-proof on Linux. Windows contributors should use WSL2 with Docker integration;
-macOS contributors should use Docker Desktop or another compatible Docker
-engine. Those host paths are contributor environments, not installer-release
-certification.
+proof on Linux. Windows 11 contributors should use WSL2 with Docker Desktop's
+WSL integration or a Docker engine running inside WSL2. macOS contributors can
+use Docker Desktop or Colima. Those host paths are contributor environments,
+not installer-release certification.
+
+### Troubleshooting the source stack
+
+- If Docker is unavailable, run `docker compose version` first and start Docker
+  Desktop, Colima, or the Docker daemon before `npm run dev:stack`.
+- If a default dev port is occupied, set the corresponding
+  `SPACE_DEV_*_PORT` variable rather than reusing installed ports `4910/4911`.
+- If a package change is not reflected in a running source service, run
+  `npm run dev:stack -- rebuild`; Vite handles `apps/web/src` edits directly
+  and the API runs under `tsx watch`.
+- If startup is interrupted, `npm run dev:stack -- down` stops the owned
+  supervisor and Compose project. Use `npm run dev:stack -- reset` for a clean
+  database and state directory; a failed volume removal is reported and leaves
+  the state in place so cleanup can be retried safely.
+- Unix socket paths are automatically shortened under the system temporary
+  directory when `.dev-stack` would exceed the platform socket-path limit.
 
 ## Make and verify a small change
 
