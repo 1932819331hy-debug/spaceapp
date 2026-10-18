@@ -24,13 +24,20 @@ import {
   waitReady
 } from "./dev-stack-lib.mjs";
 import {
+  assertOwnedState,
   assertSafeDevStackOverrides,
+  claimStateOwnership,
   claimSupervisor,
+  ownedManagedProcessRecords,
   ownedSupervisorPid,
-  releaseSupervisor
+  processIdentity,
+  releaseSupervisor,
+  writeManagedProcessRecords
 } from "./dev-stack-safety.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
+const ownershipFileName = ".ownership.json";
+const processFileName = ".processes.json";
 
 function prefixStream(stream, label, target) {
   let pending = "";
@@ -43,21 +50,52 @@ function prefixStream(stream, label, target) {
   stream.on("end", () => { if (pending) target.write(`[${label}] ${pending}\n`); });
 }
 
-function terminateTree(child, signal = "SIGTERM") {
-  if (!child || child.exitCode != null) return;
+function processGroupAlive(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false;
+  try {
+    process.kill(process.platform === "win32" ? pgid : -pgid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+export function terminateTree(child, signal = "SIGTERM") {
+  if (!child) return;
   try {
     if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
-    else child.kill(signal);
+    else if (child.exitCode == null) child.kill(signal);
   } catch (error) {
     if (error?.code !== "ESRCH") throw error;
   }
 }
 
-async function waitDead(child, timeoutMs = 7000) {
-  if (!child || child.exitCode != null) return;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline && child.exitCode == null) await sleep(100);
-  if (child.exitCode == null) terminateTree(child, "SIGKILL");
+export async function waitDead(child, timeoutMs = 7000) {
+  if (!child?.pid) return;
+  const alive = () => process.platform === "win32" ? child.exitCode == null : processGroupAlive(child.pid);
+  let deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && alive()) await sleep(100);
+  if (!alive()) return;
+  terminateTree(child, "SIGKILL");
+  deadline = Date.now() + 2000;
+  while (Date.now() < deadline && alive()) await sleep(100);
+  if (alive()) throw new Error(`Managed process group ${child.pid} did not stop cleanly.`);
+}
+
+async function waitRecordedDead(record, timeoutMs = 7000) {
+  const alive = () => processGroupAlive(record.pgid);
+  let deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && alive()) await sleep(100);
+  if (!alive()) return;
+  try {
+    process.kill(process.platform === "win32" ? record.pid : -record.pgid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  deadline = Date.now() + 2000;
+  while (Date.now() < deadline && alive()) await sleep(100);
+  if (alive()) throw new Error(`Recorded dev-stack process group ${record.pgid} did not stop cleanly.`);
 }
 
 function spawnService(config, name, command, args, env, onUnexpectedExit) {
@@ -71,6 +109,40 @@ function spawnService(config, name, command, args, env, onUnexpectedExit) {
   prefixStream(child.stderr, name, process.stderr);
   child.once("exit", (code, signal) => onUnexpectedExit(name, child, code, signal));
   return child;
+}
+
+async function identifyManagedChild(config, name, child) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const identity = await processIdentity(child.pid);
+    if (identity && identity.pgid === child.pid) {
+      return {
+        name,
+        pid: child.pid,
+        pgid: child.pid,
+        rootHash: config.rootHash,
+        startedAt: identity.startedAt,
+        args: identity.args
+      };
+    }
+    if (child.exitCode != null) break;
+    await sleep(25);
+  }
+  throw new Error(`Could not establish managed process identity for ${name}.`);
+}
+
+export async function stopRecordedProcesses(config) {
+  const records = await ownedManagedProcessRecords(config);
+  if (!records.length) return;
+  for (const record of records) {
+    try {
+      process.kill(process.platform === "win32" ? record.pid : -record.pgid, "SIGTERM");
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  }
+  await Promise.all(records.map((record) => waitRecordedDead(record)));
+  await writeManagedProcessRecords(config, []);
 }
 
 export async function ensureDarwinNodePtySpawnHelpers(root, platform = process.platform) {
@@ -122,32 +194,103 @@ async function waitServiceHealthyWithDiagnostics(config, service, timeoutMs) {
   throw new Error(`${service} did not become healthy within ${Math.round(timeoutMs / 1000)} seconds; last status=${lastStatus}.`);
 }
 
-export async function down(config) {
-  const pid = await ownedSupervisorPid(config);
-  if (pid && pid !== process.pid) {
-    process.kill(pid, "SIGTERM");
-    await waitSupervisorExit(pid);
+async function cleanupDocker(config, { volumes = false } = {}) {
+  const resources = await dockerResources(config);
+  const hasRuntimeResources = resources.containers.length || resources.networks.length;
+  const hasVolumeResources = volumes && resources.volumes.length;
+  if (!hasRuntimeResources && !hasVolumeResources) return resources;
+
+  if (existsSync(config.composeFile)) {
+    const args = ["down"];
+    if (volumes) args.push("-v");
+    args.push("--remove-orphans");
+    await compose(config, args);
+  } else {
+    if (resources.containers.length) await run("docker", ["rm", "-f", ...resources.containers]);
+    if (resources.networks.length) await run("docker", ["network", "rm", ...resources.networks]);
+    if (volumes && resources.volumes.length) await run("docker", ["volume", "rm", ...resources.volumes]);
   }
-  if (existsSync(config.composeFile)) await compose(config, ["down", "--remove-orphans"]);
+
+  const remaining = await dockerResources(config);
+  if (remaining.containers.length || remaining.networks.length || (volumes && remaining.volumes.length)) {
+    throw new Error(`Docker cleanup left owned resources behind; state preserved for retry: ${JSON.stringify(remaining)}`);
+  }
+  return remaining;
+}
+
+async function removeOwnedState(config, ownership) {
+  if (!existsSync(config.stateRoot)) return;
+  const knownEntries = new Set([
+    ownershipFileName,
+    processFileName,
+    "compose.yml",
+    "config.json",
+    "supervisor.pid",
+    "build-marker.json",
+    "secrets",
+    "bin",
+    "vendor",
+    "providers",
+    "workspaces",
+    "memory",
+    "memory-graph",
+    "artifacts",
+    "projects",
+    "diagnostics",
+    "opencode-chat",
+    "run"
+  ]);
+  const entries = await readdir(config.stateRoot);
+  const unknownEntries = entries.filter((entry) => !knownEntries.has(entry));
+  for (const entry of entries) {
+    if (entry === ownershipFileName || unknownEntries.includes(entry)) continue;
+    await rm(join(config.stateRoot, entry), { recursive: true, force: true });
+  }
+  await rm(join(config.stateRoot, ownershipFileName), { force: false });
+  if (ownership.createdStateRoot && unknownEntries.length === 0) {
+    await rm(config.stateRoot, { recursive: false, force: false });
+  }
+  if (unknownEntries.length) {
+    console.warn(`[dev:stack] Preserved unrecognized entries in ${config.stateRoot}: ${unknownEntries.join(", ")}`);
+  }
+}
+
+export async function down(config) {
+  const ownership = await assertOwnedState(config, { allowMissing: true });
+  if (ownership) {
+    const pid = await ownedSupervisorPid(config);
+    if (pid && pid !== process.pid) {
+      process.kill(pid, "SIGTERM");
+      await waitSupervisorExit(pid);
+    }
+    await stopRecordedProcesses(config);
+  }
+  await cleanupDocker(config, { volumes: false });
 }
 
 export async function reset(config) {
+  const ownership = await assertOwnedState(config, { allowMissing: true });
   await down(config);
-  if (existsSync(config.composeFile)) await compose(config, ["down", "-v", "--remove-orphans"]);
+  await cleanupDocker(config, { volumes: true });
   const remaining = await dockerResources(config);
-  if (remaining.containers.length || remaining.volumes.length) {
+  if (remaining.containers.length || remaining.volumes.length || remaining.networks.length) {
     throw new Error(`Reset left owned Docker resources behind; state preserved for retry: ${JSON.stringify(remaining)}`);
   }
-  await rm(config.stateRoot, { recursive: true, force: true });
-  const tmpSocketRoot = dirname(config.socketPath);
-  if (!tmpSocketRoot.startsWith(config.stateRoot) && tmpSocketRoot.includes(`spaceapp-dev-${config.rootHash}`)) {
-    await rm(tmpSocketRoot, { recursive: true, force: true });
+
+  if (ownership) {
+    const tmpSocketRoot = dirname(config.socketPath);
+    if (!tmpSocketRoot.startsWith(config.stateRoot) && tmpSocketRoot.includes(`spaceapp-dev-${config.rootHash}`)) {
+      await rm(tmpSocketRoot, { recursive: true, force: true });
+    }
+    await assertOwnedState(config);
+    await removeOwnedState(config, ownership);
   }
   console.log("[dev:stack] Reset complete; owned containers, volumes and state were removed.");
 }
 
 export async function status(config) {
-  const pid = await ownedSupervisorPid(config, { strict: false });
+  const ownership = await assertOwnedState(config, { allowMissing: true });
+  const pid = ownership ? await ownedSupervisorPid(config, { strict: false }) : null;
   const resources = await dockerResources(config);
   const payload = {
     running: Boolean(pid),
@@ -162,6 +305,7 @@ export async function status(config) {
 }
 
 export async function rebuild(config) {
+  await assertOwnedState(config);
   const pid = await ownedSupervisorPid(config);
   if (!pid) {
     await ensureBuild(config, true);
@@ -177,28 +321,26 @@ export async function start(config) {
   const dockerfile = await readFile(resolve(config.root, "Dockerfile"), "utf8");
   const images = parsePinnedImages(composeTemplate);
   const openCodeVersion = parseOpenCodeVersion(dockerfile);
-  const { databaseUrl, sessionSecret, postgresPassword } = await prepareState(config);
-  await mkdir(dirname(config.composeFile), { recursive: true, mode: 0o700 });
-  await writeFile(config.composeFile, renderCompose(config, images), { mode: 0o600 });
-  await writeFile(config.configFile, `${JSON.stringify({
-    root: config.root,
-    stateRoot: config.stateRoot,
-    project: config.project,
-    ports: config.ports,
-    socketPath: config.socketPath,
-    openCodeVersion
-  }, null, 2)}\n`, { mode: 0o600 });
 
   await run("docker", ["compose", "version"]);
+  await claimStateOwnership(config);
   await claimSupervisor(config);
+
   let children = new Map();
+  let processRecords = new Map();
   let stopping = false;
   let reloadChain = Promise.resolve();
+  let databaseUrl;
+  let sessionSecret;
+  let postgresPassword;
 
   const stopChildren = async () => {
-    for (const child of children.values()) terminateTree(child);
-    await Promise.all([...children.values()].map((child) => waitDead(child)));
+    const current = [...children.values()];
     children = new Map();
+    for (const child of current) terminateTree(child);
+    await Promise.all(current.map((child) => waitDead(child)));
+    processRecords = new Map();
+    await writeManagedProcessRecords(config, []);
     try { await rm(config.socketPath, { force: true }); } catch {}
   };
 
@@ -206,9 +348,12 @@ export async function start(config) {
     if (stopping) return;
     stopping = true;
     console.log(`[dev:stack] Stopping (${reason})...`);
-    await stopChildren();
-    if (existsSync(config.composeFile)) await compose(config, ["down", "--remove-orphans"], { allowFailure: true });
-    await releaseSupervisor(config);
+    try {
+      await stopChildren();
+      if (existsSync(config.composeFile)) await compose(config, ["down", "--remove-orphans"], { allowFailure: true });
+    } finally {
+      await releaseSupervisor(config);
+    }
   };
 
   const unexpectedExit = (name, child, code, signal) => {
@@ -216,6 +361,14 @@ export async function start(config) {
     console.error(`[dev:stack] ${name} exited unexpectedly (${code ?? signal}); stopping the stack.`);
     process.exitCode = 1;
     void shutdown("child-failure").finally(() => process.exit(1));
+  };
+
+  const spawnManaged = async (name, command, args, env) => {
+    const child = spawnService(config, name, command, args, env, unexpectedExit);
+    children.set(name, child);
+    const record = await identifyManagedChild(config, name, child);
+    processRecords.set(name, record);
+    await writeManagedProcessRecords(config, [...processRecords.values()]);
   };
 
   const spawnChildren = async (forceBuild = false) => {
@@ -226,10 +379,10 @@ export async function start(config) {
     }
     const openCodeWrapper = await installOpenCode(config, openCodeVersion);
     const env = sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper);
-    children.set("cli-host", spawnService(config, "cli-host", process.execPath, ["packages/cli-host/dist/main.js"], env, unexpectedExit));
-    children.set("worker", spawnService(config, "worker", process.execPath, ["apps/worker/dist/worker.js"], env, unexpectedExit));
-    children.set("api", spawnService(config, "api", "npm", ["exec", "--", "tsx", "watch", "apps/api/src/server.ts"], env, unexpectedExit));
-    children.set("web", spawnService(config, "web", "npm", ["run", "dev", "-w", "@space/web", "--", "--host", "127.0.0.1", "--port", String(config.ports.web)], env, unexpectedExit));
+    await spawnManaged("cli-host", process.execPath, ["packages/cli-host/dist/main.js"], env);
+    await spawnManaged("worker", process.execPath, ["apps/worker/dist/worker.js"], env);
+    await spawnManaged("api", "npm", ["exec", "--", "tsx", "watch", "apps/api/src/server.ts"], env);
+    await spawnManaged("web", "npm", ["run", "dev", "-w", "@space/web", "--", "--host", "127.0.0.1", "--port", String(config.ports.web)], env);
   };
 
   const reload = () => {
@@ -237,7 +390,12 @@ export async function start(config) {
       if (stopping) return;
       console.log("[dev:stack] Rebuilding workspaces and restarting source services...");
       await stopChildren();
+      if (stopping) return;
       await spawnChildren(true);
+      if (stopping) {
+        await stopChildren();
+        return;
+      }
       await waitReady(config);
       console.log("[dev:stack] Rebuild complete; source services are ready.");
     }).catch((error) => {
@@ -252,6 +410,19 @@ export async function start(config) {
   process.on("SIGHUP", reload);
 
   try {
+    await stopRecordedProcesses(config);
+    ({ databaseUrl, sessionSecret, postgresPassword } = await prepareState(config));
+    await mkdir(dirname(config.composeFile), { recursive: true, mode: 0o700 });
+    await writeFile(config.composeFile, renderCompose(config, images), { mode: 0o600 });
+    await writeFile(config.configFile, `${JSON.stringify({
+      root: config.root,
+      stateRoot: config.stateRoot,
+      project: config.project,
+      ports: config.ports,
+      socketPath: config.socketPath,
+      openCodeVersion
+    }, null, 2)}\n`, { mode: 0o600 });
+
     console.log(`[dev:stack] Starting digest-pinned PostgreSQL and Temporal (${config.project})...`);
     await compose(config, ["up", "-d", "postgres", "temporal"], {
       env: { ...process.env, SPACEAPP_DEV_POSTGRES_PASSWORD: postgresPassword }
