@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -248,7 +248,7 @@ async function removeOwnedState(config, ownership) {
   }
   await rm(join(config.stateRoot, ownershipFileName), { force: false });
   if (ownership.createdStateRoot && unknownEntries.length === 0) {
-    await rm(config.stateRoot, { recursive: false, force: false });
+    await rmdir(config.stateRoot);
   }
   if (unknownEntries.length) {
     console.warn(`[dev:stack] Preserved unrecognized entries in ${config.stateRoot}: ${unknownEntries.join(", ")}`);

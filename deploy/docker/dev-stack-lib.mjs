@@ -172,7 +172,25 @@ export async function installOpenCode(config, version) {
   }
   const wrapper = join(config.binDir, "opencode-vscode-parity");
   const binary = join(config.vendorDir, "node_modules", ".bin", "opencode");
-  await writeFile(wrapper, `#!/bin/sh\nset -eu\nexport HOME=${JSON.stringify(join(config.providerRoot, "home"))}\nexport XDG_CONFIG_HOME=${JSON.stringify(join(config.providerRoot, "config"))}\nexport XDG_DATA_HOME=${JSON.stringify(join(config.providerRoot, "data"))}\nexport XDG_CACHE_HOME=${JSON.stringify(join(config.providerRoot, "cache"))}\nexec ${JSON.stringify(binary)} \"$@\"\n`, { mode: 0o700 });
+  // The API supplies installed-runtime paths to CLI panes; override them at
+  // the executable boundary so source runs never write to an installed instance.
+  const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  const paths = {
+    HOME: join(config.providerRoot, "home"),
+    XDG_CONFIG_HOME: join(config.providerRoot, "config"),
+    XDG_DATA_HOME: join(config.providerRoot, "data"),
+    XDG_CACHE_HOME: join(config.providerRoot, "cache"),
+    XDG_STATE_HOME: join(config.providerRoot, "state"),
+    TMPDIR: join(config.providerRoot, "tmp")
+  };
+  const exports = Object.entries(paths).map(([key, value]) => `export ${key}=${shellQuote(value)}`);
+  await writeFile(wrapper, [
+    "#!/bin/sh", "set -eu", "umask 077", ...exports,
+    'export TMP="$TMPDIR" TEMP="$TMPDIR"',
+    "unset OPENCODE_API_KEY",
+    'mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$TMPDIR"',
+    `exec ${shellQuote(binary)} "$@"`, ""
+  ].join("\n"), { mode: 0o700 });
   await chmod(wrapper, 0o700);
   return wrapper;
 }
@@ -199,7 +217,7 @@ export async function ensureTemporalNamespace(config) {
 
 export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
   const env = { ...process.env };
-  for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD"]) delete env[key];
+  for (const key of ["OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SPACEAPP_DEV_POSTGRES_PASSWORD"]) delete env[key];
   if (openCodeWrapper !== join(config.binDir, "opencode-vscode-parity")) {
     throw new Error("OpenCode wrapper must live inside the controlled dev-stack command directory.");
   }

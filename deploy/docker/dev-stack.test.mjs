@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import {
   assertSafeStateRoot,
   dockerResources,
+  installOpenCode,
   parseOpenCodeVersion,
   parsePinnedImages,
   pidAlive,
@@ -16,7 +18,7 @@ import {
   resolveConfig,
   sourceEnv
 } from "./dev-stack-lib.mjs";
-import { ensureDarwinNodePtySpawnHelpers, stopRecordedProcesses, terminateTree, waitDead } from "./dev-stack.mjs";
+import { ensureDarwinNodePtySpawnHelpers, reset, stopRecordedProcesses, terminateTree, waitDead } from "./dev-stack.mjs";
 import {
   assertOwnedState,
   assertSafeDevStackOverrides,
@@ -43,6 +45,54 @@ services:
   assert.equal(parseOpenCodeVersion("RUN npm install --global opencode-ai@1.18.4"), "1.18.4");
   assert.throws(() => parsePinnedImages("services: {}"), /digest-pinned/);
   assert.throws(() => parseOpenCodeVersion("RUN npm install opencode-ai@latest"), /pinned/);
+});
+
+test("OpenCode wrapper isolates every writable path and preserves literal checkout paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-opencode-$literal-'quote-"));
+  try {
+    const config = await resolveConfig({}, root);
+    await mkdir(config.binDir, { recursive: true });
+    await mkdir(join(config.vendorDir, "node_modules", "opencode-ai"), { recursive: true });
+    await mkdir(join(config.vendorDir, "node_modules", ".bin"), { recursive: true });
+    await writeFile(join(config.vendorDir, "node_modules", "opencode-ai", "package.json"), JSON.stringify({ version: "1.18.4" }));
+    const keys = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "TMPDIR", "TMP", "TEMP"];
+    await writeFile(join(config.vendorDir, "node_modules", ".bin", "opencode"),
+      `#!${process.execPath}\nconsole.log(JSON.stringify({paths:Object.fromEntries(${JSON.stringify(keys)}.map(k=>[k,process.env[k]])),key:process.env.OPENCODE_API_KEY,args:process.argv.slice(2)}));\n`, { mode: 0o700 });
+    const wrapper = await installOpenCode(config, "1.18.4");
+    const { stdout } = await promisify(execFile)(wrapper, ["argument with spaces", "$literal"], {
+      env: { ...process.env, ...Object.fromEntries(keys.map(k => [k, "/proc/spaceapp-unwritable"])), OPENCODE_API_KEY: "parent-key" }
+    });
+    const result = JSON.parse(stdout);
+    const dirs = ["home", "config", "data", "cache", "state", "tmp", "tmp", "tmp"];
+    for (const [index, key] of keys.entries()) {
+      assert.equal(result.paths[key], join(config.providerRoot, dirs[index]));
+      assert.equal((await stat(result.paths[key])).isDirectory(), true);
+    }
+    assert.equal(result.key, undefined);
+    assert.deepEqual(result.args, ["argument with spaces", "$literal"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reset removes the owned state root after an empty Docker inventory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-reset-empty-"));
+  const oldPath = process.env.PATH;
+  try {
+    const bin = join(root, "fake-bin");
+    await mkdir(bin);
+    // Docker behavior is deliberately stubbed: this regression covers directory removal only.
+    await writeFile(join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    process.env.PATH = `${bin}:${oldPath}`;
+    const config = await resolveConfig({}, root);
+    await claimStateOwnership(config);
+    await reset(config);
+    assert.equal(existsSync(config.stateRoot), false);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("defaults isolate installed SpaceApp and bind Docker ports to loopback", async () => {
