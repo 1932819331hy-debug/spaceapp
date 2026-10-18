@@ -203,17 +203,26 @@ export async function clearProcessRecords(config) {
 }
 
 async function listGroupMembers(record, runner = run) {
-  const result = await runner("ps", ["-axo", "pid=,pgid=,sess=,stat="], { capture: true, allowFailure: true });
+  // Match the entire group that kill(-pgid) targets. Darwin's `sess` is not a
+  // session-leader PID; filtering on it can silently hide owned live members.
+  const result = await runner("ps", ["-axo", "pid=,pgid=,stat=,lstart="], {
+    capture: true, allowFailure: true, env: { ...process.env, LC_ALL: "C" }
+  });
   if (result.code !== 0) throw new Error("Could not inventory local processes; refusing to signal a dev-stack process group.");
   const members = [];
   for (const line of result.stdout.split(/\r?\n/)) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/);
-    if (!match) continue;
+    if (!line.trim()) continue;
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)(?:\s+(.+))?$/);
+    if (!match) throw new Error("Could not parse local process inventory; refusing to signal a dev-stack process group.");
     const pid = Number(match[1]);
     const pgid = Number(match[2]);
-    const sid = Number(match[3]);
-    const stat = match[4];
-    if (pgid === record.pgid && sid === record.sid && !stat.startsWith("Z")) members.push({ pid, stat });
+    const stat = match[3];
+    if (pgid !== record.pgid || stat.startsWith("Z")) continue;
+    const startedAt = match[4]?.trim();
+    if (!/^[A-Za-z?]/.test(stat) || !/^[A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}$/.test(startedAt || "")) {
+      throw new Error(`Could not establish start identity for PID ${pid}; refusing to signal its process group.`);
+    }
+    members.push({ pid, stat, startedAt });
   }
   return members;
 }
@@ -224,9 +233,23 @@ async function processHasToken(pid, token, runner = run) {
   return result.stdout.includes(`SPACE_DEV_PROCESS_TOKEN=${token}`);
 }
 
-async function verifiedGroupMembers(record, ownership, runner = run) {
+async function snapshotLiveGroup(record, ownership, child, runner) {
+  const isLiveChild = () => child?.pid === record.pid && child.exitCode === null && child.signalCode === null;
+  if (!isLiveChild()) return new Map();
+  const members = await listGroupMembers(record, runner);
+  if (!members.some((member) => member.pid === child.pid) || !await processHasToken(child.pid, ownership.token, runner) || !isLiveChild()) {
+    return new Map();
+  }
+  // The current supervisor's live child anchors this session. Descendants may
+  // intentionally drop the token; retain their start identities before signalling.
+  // Neither persisted records nor an already-exited child grant this trust.
+  return new Map(members.map((member) => [member.pid, member.startedAt]));
+}
+
+async function verifiedGroupMembers(record, ownership, runner = run, trustedMembers = new Map()) {
   const members = await listGroupMembers(record, runner);
   for (const member of members) {
+    if (trustedMembers.get(member.pid) === member.startedAt) continue;
     if (!await processHasToken(member.pid, ownership.token, runner)) {
       throw new Error(`Refusing to signal process group ${record.pgid}: PID ${member.pid} does not carry this dev-stack ownership token.`);
     }
@@ -234,8 +257,8 @@ async function verifiedGroupMembers(record, ownership, runner = run) {
   return members;
 }
 
-async function signalVerifiedGroup(record, ownership, signal, runner, signaler) {
-  const members = await verifiedGroupMembers(record, ownership, runner);
+async function signalVerifiedGroup(record, ownership, signal, runner, signaler, trustedMembers) {
+  const members = await verifiedGroupMembers(record, ownership, runner, trustedMembers);
   if (!members.length) return false;
   try {
     if (process.platform === "win32") {
@@ -251,6 +274,7 @@ async function signalVerifiedGroup(record, ownership, signal, runner, signaler) 
 
 export async function terminateOwnedProcessGroups(config, ownership, {
   records = null,
+  liveChildren = [],
   timeoutMs = 7000,
   runner = run,
   signaler = process.kill
@@ -258,17 +282,20 @@ export async function terminateOwnedProcessGroups(config, ownership, {
   validateOwnership(config, ownership);
   const groups = (records ?? await readProcessRecords(config, ownership)).map(validateProcessRecord);
   for (const record of groups) {
-    if (!await signalVerifiedGroup(record, ownership, "SIGTERM", runner, signaler)) continue;
+    const child = records == null ? null : liveChildren.find((candidate) => candidate.pid === record.pid);
+    const trustedMembers = await snapshotLiveGroup(record, ownership, child, runner);
+    const members = () => verifiedGroupMembers(record, ownership, runner, trustedMembers);
+    if (!await signalVerifiedGroup(record, ownership, "SIGTERM", runner, signaler, trustedMembers)) continue;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (!(await verifiedGroupMembers(record, ownership, runner)).length) break;
+      if (!(await members()).length) break;
       await sleep(100);
     }
-    if ((await verifiedGroupMembers(record, ownership, runner)).length) {
-      await signalVerifiedGroup(record, ownership, "SIGKILL", runner, signaler);
+    if ((await members()).length) {
+      await signalVerifiedGroup(record, ownership, "SIGKILL", runner, signaler, trustedMembers);
       const killDeadline = Date.now() + 2000;
-      while (Date.now() < killDeadline && (await verifiedGroupMembers(record, ownership, runner)).length) await sleep(50);
-      if ((await verifiedGroupMembers(record, ownership, runner)).length) {
+      while (Date.now() < killDeadline && (await members()).length) await sleep(50);
+      if ((await members()).length) {
         throw new Error(`Owned process group ${record.pgid} did not terminate; process ownership state was preserved for retry.`);
       }
     }

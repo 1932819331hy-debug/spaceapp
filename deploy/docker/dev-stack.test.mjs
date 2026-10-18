@@ -278,16 +278,144 @@ test("persisted process-group ownership cleans descendants after the leader exit
     assert.ok(Number.isInteger(childPid) && childPid > 1);
 
     await terminateOwnedProcessGroups(config, owner, { timeoutMs: 1500 });
-    const groupStatus = await run("ps", ["-axo", "pid=,pgid=,sid=,stat="], { capture: true, allowFailure: true });
+    const groupStatus = await run("ps", ["-axo", "pid=,pgid=,stat="], { capture: true });
+    assert.equal(groupStatus.code, 0);
     const liveMembers = groupStatus.stdout.split(/\r?\n/).filter((line) => {
-      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/);
-      return match && Number(match[2]) === record.pgid && Number(match[3]) === record.sid && !match[4].startsWith("Z");
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+      return match && Number(match[2]) === record.pgid && !match[3].startsWith("Z");
     });
     assert.deepEqual(liveMembers, []);
     assert.equal(existsSync(config.processFile), false);
   } finally {
     try { process.kill(-leader.pid, "SIGKILL"); } catch {}
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("live child ownership cleans environment-sanitized descendants without relaxing persisted recovery", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-sanitized-descendant-"));
+  const config = { rootHash: "abcdef0123", processFile: join(root, "process-groups.json") };
+  const owner = ownership(config.rootHash);
+  const readyFile = join(root, "descendant.json");
+  const descendantScript = `
+    process.on("SIGTERM", () => {});
+    require("node:fs").writeFileSync(${JSON.stringify(readyFile)}, JSON.stringify({ pid: process.pid, token: process.env.SPACE_DEV_PROCESS_TOKEN }));
+    setInterval(() => {}, 1000);
+  `;
+  const leader = spawn(process.execPath, ["-e", `
+    require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: "ignore", env: {} });
+    setInterval(() => {}, 1000);
+  `], { detached: true, stdio: "ignore", env: { ...process.env, SPACE_DEV_PROCESS_TOKEN: owner.token } });
+  const record = { name: "sanitized-probe", pid: leader.pid, pgid: leader.pid, sid: leader.pid };
+  try {
+    await writeProcessRecords(config, owner, [record]);
+    const deadline = Date.now() + 3000;
+    while (!existsSync(readyFile) && Date.now() < deadline) await sleep(20);
+    const descendant = JSON.parse(await readFile(readyFile, "utf8"));
+    assert.equal(descendant.token, undefined);
+    assert.equal(leader.exitCode, null);
+
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner), /does not carry this dev-stack ownership token/);
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { liveChildren: [leader] }), /does not carry this dev-stack ownership token/);
+    await assert.rejects(() => terminateOwnedProcessGroups(config, owner, { records: [record] }), /does not carry this dev-stack ownership token/);
+    assert.equal(existsSync(config.processFile), true);
+
+    await terminateOwnedProcessGroups(config, owner, { records: [record], liveChildren: [leader], timeoutMs: 100 });
+    const status = await run("ps", ["-p", String(descendant.pid), "-o", "stat="], { capture: true, allowFailure: true });
+    assert.ok(status.code !== 0 || status.stdout.startsWith("Z"));
+    assert.notEqual(leader.signalCode, null);
+  } finally {
+    try { process.kill(-leader.pid, "SIGKILL"); } catch {}
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("live group snapshots fail closed on stale leaders and changed process identities", { skip: process.platform === "win32" }, async (t) => {
+  const config = { rootHash: "abcdef0123" };
+  const owner = ownership(config.rootHash);
+  const record = { name: "identity-probe", pid: 4100, pgid: 4100, sid: 4100 };
+  const startedAt = "Sun Oct 18 07:40:00 2026";
+
+  for (const scenario of ["exited leader", "different child", "leader exits during snapshot", "missing leader", "wrong leader token", "reused descendant", "new unverified descendant", "missing start identity"]) {
+    await t.test(scenario, async () => {
+      const child = { pid: scenario === "different child" ? 4200 : record.pid, exitCode: scenario === "exited leader" ? 0 : null, signalCode: null };
+      const signals = [];
+      let terminated = false;
+      const runner = async (_command, args) => {
+        if (args[0] === "-axo") {
+          const leader = scenario === "missing leader" || terminated ? "" : `4100 4100 S ${startedAt}\n`;
+          const childStart = terminated && scenario === "reused descendant" ? "Sun Oct 18 07:41:00 2026" : startedAt;
+          const descendant = `4101 4100 S${scenario === "missing start identity" ? "" : ` ${childStart}`}\n`;
+          const newcomer = terminated && scenario === "new unverified descendant" ? `4102 4100 S ${startedAt}\n` : "";
+          return { code: 0, stdout: leader + descendant + newcomer, stderr: "" };
+        }
+        const pid = Number(args[args.indexOf("-p") + 1]);
+        if (pid === record.pid) {
+          if (scenario === "leader exits during snapshot") child.signalCode = "SIGTERM";
+          return { code: 0, stdout: scenario === "wrong leader token" ? "node unrelated" : `node SPACE_DEV_PROCESS_TOKEN=${owner.token}`, stderr: "" };
+        }
+        return { code: 0, stdout: "node sanitized-child", stderr: "" };
+      };
+      await assert.rejects(() => terminateOwnedProcessGroups(config, owner, {
+        records: [record], liveChildren: [child], runner, timeoutMs: 0,
+        signaler: (pid, signal) => { signals.push([pid, signal]); terminated = true; child.signalCode = signal; }
+      }), /does not carry this dev-stack ownership token|Could not establish start identity/);
+      const expected = ["reused descendant", "new unverified descendant"].includes(scenario) ? [[-record.pgid, "SIGTERM"]] : [];
+      assert.deepEqual(signals, expected);
+    });
+  }
+});
+
+test("process-group cleanup does not depend on Darwin sess values", async (t) => {
+  for (const sess of ["0", "ffffffff8100abcd"]) {
+    await t.test(`sess=${sess}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "spaceapp-darwin-group-"));
+      const config = { rootHash: "abcdef0123", processFile: join(root, "process-groups.json") };
+      const owner = ownership(config.rootHash);
+      const record = { name: "darwin-probe", pid: 4100, pgid: 4100, sid: 4100 };
+      const signals = [];
+      let stopped = false;
+      try {
+        await writeProcessRecords(config, owner, [record]);
+        const runner = async (_command, args) => {
+          if (args[0] !== "-axo") return { code: 0, stdout: `node SPACE_DEV_PROCESS_TOKEN=${owner.token}`, stderr: "" };
+          const fields = args[1].split(",").map((field) => field.replace(/=$/, ""));
+          const rows = stopped ? [] : [4100, 4101].map((pid) => ({ pid, pgid: 4100, sess, stat: "S", lstart: "Sun Oct 18 07:40:00 2026" }));
+          return { code: 0, stdout: rows.map((row) => fields.map((field) => row[field]).join(" ")).join("\n"), stderr: "" };
+        };
+        await terminateOwnedProcessGroups(config, owner, {
+          runner, timeoutMs: 0,
+          signaler: (pid, signal) => { signals.push([pid, signal]); stopped = true; }
+        });
+        assert.deepEqual(signals, process.platform === "win32" ? [[4100, "SIGTERM"], [4101, "SIGTERM"]] : [[-4100, "SIGTERM"]]);
+        assert.equal(existsSync(config.processFile), false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("malformed process inventory preserves recovery records without signalling", async (t) => {
+  for (const stdout of ["unparseable process", "4100 4100 0 S Sun Oct 18 07:40:00 2026", "4100 4100 broken-sess S Sun Oct 18 07:40:00 2026", "4100 4100 S"]) {
+    await t.test(stdout, async () => {
+      const root = await mkdtemp(join(tmpdir(), "spaceapp-malformed-group-"));
+      const config = { rootHash: "abcdef0123", processFile: join(root, "process-groups.json") };
+      const owner = ownership(config.rootHash);
+      const record = { name: "malformed-probe", pid: 4100, pgid: 4100, sid: 4100 };
+      const signals = [];
+      try {
+        await writeProcessRecords(config, owner, [record]);
+        await assert.rejects(() => terminateOwnedProcessGroups(config, owner, {
+          runner: async () => ({ code: 0, stdout, stderr: "" }),
+          signaler: (...args) => signals.push(args)
+        }), /Could not parse local process inventory|Could not establish start identity/);
+        assert.deepEqual(signals, []);
+        assert.equal(existsSync(config.processFile), true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 

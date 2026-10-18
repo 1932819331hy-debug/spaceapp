@@ -251,7 +251,7 @@ export async function start(config) {
     const records = snapshot.map((entry) => entry.record);
     await processRecordWrite;
     if (records.length) {
-      await terminateOwnedProcessGroups(config, ownership, { records });
+      await terminateOwnedProcessGroups(config, ownership, { records, liveChildren: snapshot.map((entry) => entry.child) });
       await clearProcessRecords(config);
     }
     try { await rm(config.socketPath, { force: true }); } catch {}
