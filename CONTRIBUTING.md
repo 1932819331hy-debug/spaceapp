@@ -50,6 +50,66 @@ select a short temporary directory you own and set `TMPDIR` for the command.
 On Windows run this particular smoke check inside WSL or a Linux development
 container. It does not certify the Windows/macOS installer.
 
+## Run the complete app from source
+
+With Docker Engine or Docker Desktop available, start the contributor stack:
+
+```sh
+npm run dev:stack
+```
+
+The command starts digest-pinned PostgreSQL with pgvector and Temporal in an
+isolated Compose project, builds the workspace before migrations on a fresh
+checkout, installs the `opencode-ai` version pinned by `Dockerfile` into local
+state, and launches the CLI host, worker, API and Vite web server from this
+checkout. The API uses normal single-owner setup: `SPACE_DEV_LOGIN` stays off.
+When `/readyz` reports the database, worker and CLI host as running, the command
+prints the local Web URL and one-time owner setup token.
+
+The default source-stack ports are deliberately separate from an installed
+SpaceApp: API `5910`, Web `5911`, PostgreSQL `55432`, and Temporal `57233`.
+Docker-published ports bind to `127.0.0.1`. Runtime state and generated secrets
+live under the git-ignored `.dev-stack/`; secret files are mode `0600`. Provider
+API keys and GitHub tokens inherited by the shell are not passed to source
+services.
+
+Useful lifecycle commands are:
+
+```sh
+npm run dev:stack -- status
+npm run dev:stack -- rebuild
+npm run dev:stack -- down
+npm run dev:stack -- reset
+```
+
+`rebuild` rebuilds workspace packages and restarts the source services under the
+same supervisor. `down` stops only this checkout's supervised processes and
+Compose project. `reset` additionally removes this checkout's Compose volumes
+and state directory; if Docker cannot remove an owned volume, reset fails and
+keeps the state needed to retry cleanup instead of reporting success.
+
+The isolated ports can be overridden with `SPACE_DEV_API_PORT`,
+`SPACE_DEV_WEB_PORT`, `SPACE_DEV_POSTGRES_PORT`, and
+`SPACE_DEV_TEMPORAL_PORT`. `SPACE_DEV_STACK_DIR` selects another state
+directory and `SPACE_DEV_COMPOSE_PROJECT` selects another Compose project.
+The runner rejects installed-instance ports `4910` and `4911`, duplicate ports,
+unsafe state roots, and symlink state roots.
+
+For an automated end-to-end proof after the stack is ready, run:
+
+```sh
+npm run verify:dev-stack
+```
+
+That proof performs normal owner setup, points the Getting Started room at the
+current checkout rather than `/opt/spaceapp`, starts its OpenCode terminal pane
+through the real CLI host, requires an active CLI session status, and verifies
+that the stack remains ready. The dedicated GitHub Actions workflow runs this
+proof on Linux. Windows contributors should use WSL2 with Docker integration;
+macOS contributors should use Docker Desktop or another compatible Docker
+engine. Those host paths are contributor environments, not installer-release
+certification.
+
 ## Make and verify a small change
 
 Work on a branch, not on `main`, so the change can become a pull request:
