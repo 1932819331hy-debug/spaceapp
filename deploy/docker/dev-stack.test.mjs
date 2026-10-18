@@ -8,7 +8,8 @@ import {
   parseOpenCodeVersion,
   parsePinnedImages,
   renderCompose,
-  resolveConfig
+  resolveConfig,
+  sourceEnv
 } from "./dev-stack-lib.mjs";
 
 test("source stack derives third-party pins from canonical files", () => {
@@ -41,6 +42,15 @@ test("defaults isolate installed SpaceApp and bind Docker ports to loopback", as
     assert.match(compose, /POSTGRES_PASSWORD_FILE: \/run\/secrets\/postgres-password/);
     assert.match(compose, /condition: service_healthy/);
     assert.match(compose, /temporal operator cluster health --address temporal:7233/);
+
+    const wrapper = join(config.binDir, "opencode-vscode-parity");
+    const env = sourceEnv(config, "postgresql://spaceapp:test@127.0.0.1:55432/spaceapp_dev", "session-secret-with-enough-length", wrapper);
+    assert.equal(env.SPACE_CLI_COMMAND_PATH, config.binDir);
+    assert.equal(env.SPACE_CLI_OPENCODE_COMMAND, "opencode-vscode-parity");
+    assert.equal(env.SPACE_DEV_LOGIN, "false");
+    assert.equal(env.SPACE_API_HOST, "127.0.0.1");
+    assert.equal(env.SPACE_WEB_HOST, "127.0.0.1");
+    assert.throws(() => sourceEnv(config, "postgresql://x", "session-secret-with-enough-length", "/tmp/opencode-vscode-parity"), /controlled dev-stack command directory/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
