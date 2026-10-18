@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { devStackTestOwner } from "./dev-stack-test-fixtures.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const stateRoot = resolve(process.env.SPACE_DEV_STACK_DIR || join(root, ".dev-stack"));
@@ -77,8 +78,7 @@ const ready = await waitReady();
 console.log(`[dev-stack-verify] PASS readiness database=${ready.dependencies.database} worker=${ready.dependencies.worker} cliHost=${ready.dependencies.cliHost}`);
 
 const setupToken = (await readFile(join(stateRoot, "secrets", "setup-token"), "utf8")).trim();
-const email = "dev-stack-ci@example.com";
-const password = "dev-stack-ci-password-42!";
+const { email, password } = devStackTestOwner;
 const claimed = await request("/api/setup/claim", {
   method: "POST",
   body: { token: setupToken, email, password }

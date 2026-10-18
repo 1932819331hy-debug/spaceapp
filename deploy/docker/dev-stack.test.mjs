@@ -88,14 +88,18 @@ test("build markers ignore generated-directory timestamps but detect source chan
 });
 
 test("startup build ownership covers cancellation, success, and failure", { skip: process.platform === "win32" }, async (t) => {
-  for (const mode of ["cancel", "renamed-cancel", "success", "failure", "spawn-failure"]) await t.test(mode, async () => {
-    const cancel = mode.endsWith("cancel");
+  for (const mode of ["cancel", "renamed-cancel", "slow-down", "repeated-stop", "success", "failure", "spawn-failure"]) await t.test(mode, async () => {
+    const delayedDocker = ["slow-down", "repeated-stop"].includes(mode);
+    const cancel = mode.endsWith("cancel") || delayedDocker;
     const root = await mkdtemp(join(tmpdir(), "spaceapp-build-cancel-"));
     const config = await resolveConfig({}, root);
     const bin = join(root, "fake-bin");
     const familyFile = join(root, "build-family.json");
     const migrationFile = join(root, "migration-started");
+    const dockerStopping = join(root, "docker-stopping");
+    const dockerStopped = join(root, "docker-stopped");
     let supervisor;
+    let downCaller;
     let unrelated;
     let family;
     let output = "";
@@ -106,7 +110,13 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       await writeFile(join(root, "Dockerfile"), "RUN npm install opencode-ai@1.18.4\n");
       await writeFile(join(bin, "docker"), `#!${process.execPath}
         const args = process.argv.slice(2);
-        if (args[0] === "inspect") console.log("healthy");
+        const fs = require("node:fs");
+        if (${delayedDocker} && args[0] === "ps" && !fs.existsSync(${JSON.stringify(dockerStopped)})) console.log("fixture-container");
+        else if (${delayedDocker} && args[0] === "compose" && args.includes("down")) {
+          fs.appendFileSync(${JSON.stringify(dockerStopping)}, "down\\n");
+          setTimeout(() => fs.writeFileSync(${JSON.stringify(dockerStopped)}, "stopped"), ${mode === "slow-down" ? 16100 : 300});
+        }
+        else if (args[0] === "inspect") console.log("healthy");
         else if (args[0] === "compose" && args.includes("ps")) console.log("fixture-service");
       `, { mode: 0o700 });
       await writeFile(join(bin, "npm"), `#!${process.execPath}
@@ -163,10 +173,35 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       while (!existsSync(familyFile) && Date.now() < startedDeadline && supervisor.exitCode === null) await sleep(25);
       assert.equal(existsSync(familyFile), mode !== "spawn-failure", output);
       if (existsSync(familyFile)) family = JSON.parse(await readFile(familyFile, "utf8"));
-      if (cancel) supervisor.kill("SIGTERM");
-      const stoppedDeadline = Date.now() + 10000;
+      if (delayedDocker) {
+        const downLauncher = join(root, "down.mjs");
+        await writeFile(downLauncher, `
+          import { down } from ${JSON.stringify(new URL("./dev-stack.mjs", import.meta.url).href)};
+          import { resolveConfig } from ${JSON.stringify(new URL("./dev-stack-lib.mjs", import.meta.url).href)};
+          down(await resolveConfig({}, ${JSON.stringify(root)})).catch(error => { console.error(error.message); process.exitCode = 1; });
+        `);
+        downCaller = spawn(process.execPath, [downLauncher], { env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` }, stdio: ["ignore", "pipe", "pipe"] });
+        downCaller.stdout.on("data", chunk => { output += chunk.toString(); });
+        downCaller.stderr.on("data", chunk => { output += chunk.toString(); });
+        const stoppingDeadline = Date.now() + 10000;
+        while (!existsSync(dockerStopping) && Date.now() < stoppingDeadline) await sleep(25);
+        assert.equal(existsSync(dockerStopping), true, output);
+        if (mode === "repeated-stop") {
+          supervisor.kill("SIGTERM");
+          supervisor.kill("SIGINT");
+          await sleep(25);
+          supervisor.kill("SIGINT");
+        }
+      } else if (cancel) supervisor.kill("SIGTERM");
+      const stoppedDeadline = Date.now() + (delayedDocker ? 25000 : 10000);
       while (supervisor.exitCode === null && supervisor.signalCode === null && Date.now() < stoppedDeadline) await sleep(25);
       assert.notEqual(supervisor.exitCode ?? supervisor.signalCode, null, output);
+      if (downCaller) {
+        while (downCaller.exitCode === null && downCaller.signalCode === null && Date.now() < stoppedDeadline) await sleep(25);
+        assert.equal(downCaller.exitCode, 0, output);
+        assert.equal(supervisor.signalCode, null, "Repeated stop signals must not interrupt the supervisor's cleanup.");
+        assert.equal(await readFile(dockerStopping, "utf8"), "down\n", "Only the supervisor should run Docker teardown while it is alive.");
+      }
       for (const pid of [family?.leader, family?.descendant].filter(Number.isInteger)) {
         const result = await run("ps", ["-p", String(pid), "-o", "stat="], { capture: true, allowFailure: true });
         assert.ok(result.code !== 0 || result.stdout.startsWith("Z"), `build PID ${pid} survived cancellation: ${result.stdout}`);
@@ -182,6 +217,7 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       assert.equal(existsSync(config.pidFile), false);
       assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "an unrelated process must remain alive");
     } finally {
+      if (downCaller?.exitCode === null && downCaller?.signalCode === null) downCaller.kill("SIGKILL");
       for (const pid of [supervisor?.pid, family?.leader, unrelated?.pid]) {
         if (Number.isInteger(pid)) try { process.kill(-pid, "SIGKILL"); } catch {}
       }

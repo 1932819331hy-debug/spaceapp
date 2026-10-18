@@ -115,6 +115,17 @@ Docker engine running inside WSL2; that path follows the Linux host model.
 These host paths are contributor environments, not installer-release
 certification.
 
+The Linux lifecycle job also edits and restores source files in its disposable
+checkout: it checks API watch restarts, imports a rebuilt package marker through
+the running API, and verifies Vite updates a real Chrome page without navigation
+or losing form state. It then stops the owned worker, requires a clear failure
+and nonzero supervisor exit, and exercises an explicit normal restart with the
+same owner data. These mutation probes are CI-only and are not needed for normal
+contributor startup. Their screenshots include only the anonymous login heading;
+state directories, credentials, browser profiles and source backups are not
+uploaded. The final cleanup restores original source bytes and checks owned
+processes, containers, volumes, networks, state and the Unix socket are gone.
+
 ### Troubleshooting the source stack
 
 - If Docker is unavailable, run `docker compose version` first and start Docker

@@ -82,7 +82,10 @@ export async function ensureDarwinNodePtySpawnHelpers(root, platform = process.p
   return repaired;
 }
 
-async function waitSupervisorExit(config, pid, timeoutMs = 15_000) {
+// Four service groups can each use 7s graceful + 2s forced termination, then
+// Docker stops the dependent containers. Include bounded VM/CLI overhead too;
+// 15s could expire while a healthy Colima teardown was still making progress.
+async function waitSupervisorExit(config, pid, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await ownedSupervisorPid(config, { strict: false }) !== pid) return;
@@ -364,8 +367,10 @@ export async function start(config) {
     });
   };
 
-  process.once("SIGINT", () => finishShutdown("SIGINT"));
-  process.once("SIGTERM", () => finishShutdown("SIGTERM"));
+  // Keep handlers installed throughout asynchronous cleanup: a concurrent down
+  // or reset must join the same shutdown, not restore the default fatal signal.
+  process.on("SIGINT", () => finishShutdown("SIGINT"));
+  process.on("SIGTERM", () => finishShutdown("SIGTERM"));
   process.on("SIGHUP", reload);
 
   try {
