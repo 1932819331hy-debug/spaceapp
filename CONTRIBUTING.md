@@ -64,7 +64,13 @@ checkout, installs the `opencode-ai` version pinned by `Dockerfile` into local
 state, and launches the CLI host, worker, API and Vite web server from this
 checkout. The API uses normal single-owner setup: `SPACE_DEV_LOGIN` stays off.
 When `/readyz` reports the database, worker and CLI host as running, the command
-prints the local Web URL and one-time owner setup token.
+prints the local Web URL. It queries the API's owner setup status and prints the
+one-time setup token **only** if an owner has not been claimed and that token is
+still valid. On an ordinary restart after owner creation, it prints a sign-in
+instruction instead; an expired or unavailable setup token is not displayed.
+If the API setup status cannot be verified, startup fails rather than logging a
+possibly consumed token. Do not use `reset` merely to recover a setup token:
+`reset` deletes this checkout's persistent dev data.
 
 The default source-stack ports are deliberately separate from an installed
 SpaceApp: API `5910`, Web `5911`, PostgreSQL `55432`, and Temporal `57233`.
