@@ -32,6 +32,7 @@ describe("Space agent bootstrap", () => {
       expect(prompt).toContain("/tmp/source-stack-owned-memory/gemini.md");
       expect(prompt).toContain("/tmp/source-stack-owned-memory/gemini_history.md");
       expect(prompt).toContain("Treat Space Memory in /tmp/source-stack-owned-memory as canonical");
+      expect(prompt).toContain("native filesystem tools");
       expect(prompt).toContain("do not use an installed-instance memory bridge");
       expect(prompt).toContain("current source checkout's CONTRIBUTING.md");
       expect(prompt).not.toContain("Treat Space Memory in /opt/spaceapp/docs as canonical");
@@ -48,7 +49,10 @@ describe("Space agent bootstrap", () => {
     try {
       const markdown = buildCliAgentBootstrapMarkdown();
       expect(markdown).toContain("Use the current source checkout for Space source-code tasks");
-      expect(markdown).toContain("Read or write canonical Space Memory only through Space API endpoints");
+      expect(markdown).toContain("Read or write canonical Space Memory directly under the configured source-stack memory root");
+      expect(markdown).toContain("native filesystem tools");
+      expect(markdown).toContain("/tmp/source-cli-owned-memory");
+      expect(markdown).toContain("never use an installed-instance memory bridge");
       expect(markdown).toContain("use verified Space API task capabilities for the current source stack");
       expect(markdown).not.toContain("/opt/spaceapp");
       expect(markdown).not.toContain("Treat /etc as the default operational workspace");

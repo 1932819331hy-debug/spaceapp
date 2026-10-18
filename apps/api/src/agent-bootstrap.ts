@@ -91,7 +91,7 @@ export function buildSpaceAgentBootstrapPrompt(input: SpaceAgentBootstrapInput):
     ...identityLines(input),
     `- Read the compact ${spaceAgentCorePath()} core once. Load only task-relevant domain rules; ${installedMemory ? "read /opt/spaceapp/docs/agent_local_workspace_hygiene.md" : "follow the current source checkout's CONTRIBUTING.md"} before local project/dev-server/cleanup work.`,
     `- Canonical Space Memory: ${spaceMemoryIndexPath()} plus ${spaceMemoryMonthlyPath(memoryMonth)}.`,
-    `- Memory parity: ${installedMemory ? "read/search/save through the Space Memory bridge (/opt/spaceapp/bin/space-memory-recall, /opt/spaceapp/bin/space-memory-save) or Space API memory endpoints" : "read/search/save through Space API memory endpoints; do not use an installed-instance memory bridge"}. Treat Space Memory in ${memoryDirectory} as canonical operational memory; Codex ad-hoc notes are fallback only.`,
+    `- Memory parity: ${installedMemory ? "read/search/save through the Space Memory bridge (/opt/spaceapp/bin/space-memory-recall, /opt/spaceapp/bin/space-memory-save) or Space API memory endpoints" : "read/search/save directly under the configured source-stack memory root with native filesystem tools, or through authenticated Space API memory endpoints when available; do not use an installed-instance memory bridge"}. Treat Space Memory in ${memoryDirectory} as canonical operational memory; Codex ad-hoc notes are fallback only.`,
     "- Tools: choose verified native tools first. MCP is on-demand fallback or Space-specific access, never a mandatory substitute for a capable native tool. Keep evidence and authorization requirements regardless of transport.",
     "- Images: use native vision whenever available. Vision MCP is only for verified text-only input pipelines; unknown model support requires checking capability metadata first.",
     "- Skills: load only relevant guidance when needed. Workflow skills require operator opt-in; a skill must not force an inferior tool. Do not list every skill or tool at startup.",
@@ -122,7 +122,7 @@ export function buildCliAgentBootstrapMarkdown(input: Omit<SpaceAgentBootstrapIn
     : `- Use the current source checkout for Space source-code tasks; do not target an installed SpaceApp instance.
 - This artifact folder is not the project root. For Space source code, use the current source checkout.
 - Prefer native filesystem/search/shell tools for ordinary work. Use protected Space APIs or the on-demand entrypoint for Space-specific capabilities.
-- Read or write canonical Space Memory only through Space API endpoints; its files are under the configured source-stack memory root listed above.`;
+- Read or write canonical Space Memory directly under the configured source-stack memory root listed above with native filesystem tools. Authenticated Space API memory endpoints are an optional equivalent transport when available; never use an installed-instance memory bridge.`;
   return `# Space CLI Agent Bootstrap
 
 This CLI session is launched by Space. It uses a managed writable workspace only to persist the terminal session and uploads.

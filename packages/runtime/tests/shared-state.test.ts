@@ -3,12 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCanonicalSpaceMemoryBridge, defaultCanonicalSpaceMemoryPaths, resolveCanonicalSpaceMemoryPaths } from "../src/shared-state.js";
-import { usesLegacyMemoryFiles } from "../src/space-memory-files.js";
+import { SPACE_MEMORY_DIRECTORY, usesLegacyMemoryFiles } from "../src/space-memory-files.js";
 
 describe("canonical Space Memory paths", () => {
   it("uses the Athens calendar month and one shared default lock", () => {
     const paths = resolveCanonicalSpaceMemoryPaths({}, new Date("2026-06-30T22:30:00.000Z"));
-    const name = usesLegacyMemoryFiles() ? "gemini_history" : "space_memory";
+    const name = usesLegacyMemoryFiles(SPACE_MEMORY_DIRECTORY) ? "gemini_history" : "space_memory";
 
     expect(paths).toEqual({
       indexPath: `/opt/spaceapp/docs/${name}.md`,
