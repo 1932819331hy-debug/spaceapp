@@ -5,9 +5,24 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const stateRoot = resolve(process.env.SPACE_DEV_STACK_DIR || join(root, ".dev-stack"));
-const config = JSON.parse(await readFile(join(stateRoot, "config.json"), "utf8"));
-const api = `http://127.0.0.1:${config.ports.api}`;
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+async function waitForJson(path, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      return JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      lastError = error;
+      await sleep(250);
+    }
+  }
+  throw new Error(`Timed out waiting for source-stack bootstrap file ${path}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+const config = await waitForJson(join(stateRoot, "config.json"));
+const api = `http://127.0.0.1:${config.ports.api}`;
 
 function firstCookie(response) {
   const values = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [];
@@ -32,7 +47,7 @@ async function request(path, { method = "GET", body, cookie, csrf, csrfHeader = 
 }
 
 async function waitReady() {
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
     try {
       const { payload } = await request("/readyz");
