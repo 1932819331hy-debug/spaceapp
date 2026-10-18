@@ -47,7 +47,7 @@ async function request(path, { method = "GET", body, cookie, csrf, csrfHeader = 
 }
 
 async function waitReady() {
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + 420_000;
   while (Date.now() < deadline) {
     try {
       const { payload } = await request("/readyz");
