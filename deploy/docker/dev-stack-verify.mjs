@@ -149,7 +149,14 @@ let socketError = null;
 let socketClosed = null;
 const socket = new WebSocket(wsUrl, { headers: { cookie } });
 socket.on("message", (data) => {
-  if (terminalOutput.length < 200_000) terminalOutput += data.toString();
+  let message = null;
+  try { message = JSON.parse(data.toString()); } catch { return; }
+  if (message?.type === "error") {
+    socketError = new Error(`OpenCode terminal server error: ${message.message || message.code || "unknown error"}`);
+    return;
+  }
+  if (message?.type !== "output" || typeof message.data !== "string" || message.data.length === 0) return;
+  if (terminalOutput.length < 200_000) terminalOutput += message.data.slice(0, 200_000 - terminalOutput.length);
 });
 socket.on("error", (error) => { socketError = error; });
 socket.on("close", (code, reason) => {
