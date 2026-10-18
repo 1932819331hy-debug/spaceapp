@@ -86,7 +86,9 @@ npm run dev:stack -- reset
 same supervisor. `down` stops only this checkout's supervised processes and
 Compose project. `reset` additionally removes this checkout's Compose volumes
 and state directory; if Docker cannot remove an owned volume, reset fails and
-keeps the state needed to retry cleanup instead of reporting success.
+keeps the state needed to retry cleanup instead of reporting success. Lifecycle
+commands verify the recorded supervisor start identity and checkout hash before
+sending a signal, so a stale PID file cannot target a reused unrelated PID.
 
 The isolated ports can be overridden with `SPACE_DEV_API_PORT`,
 `SPACE_DEV_WEB_PORT`, `SPACE_DEV_POSTGRES_PORT`, and
@@ -104,12 +106,14 @@ npm run verify:dev-stack
 
 That proof performs normal owner setup, points the Getting Started room at the
 current checkout rather than `/opt/spaceapp`, starts its OpenCode terminal pane
-through the real CLI host, requires an active CLI session status, and verifies
-that the stack remains ready. The dedicated GitHub Actions workflow runs this
-proof on Linux. Windows 11 contributors should use WSL2 with Docker Desktop's
-WSL integration or a Docker engine running inside WSL2. macOS contributors can
-use Docker Desktop or Colima. Those host paths are contributor environments,
-not installer-release certification.
+through the real CLI host, attaches the same terminal WebSocket transport used
+by the web UI, requires a running CLI session plus real terminal output, and
+verifies that the stack remains ready. The dedicated GitHub Actions workflow
+runs this lifecycle on Linux and on an Intel macOS runner using Colima. Windows
+11 contributors should use WSL2 with Docker Desktop's WSL integration or a
+Docker engine running inside WSL2; that path follows the Linux host model.
+These host paths are contributor environments, not installer-release
+certification.
 
 ### Troubleshooting the source stack
 
@@ -124,6 +128,10 @@ not installer-release certification.
   supervisor and Compose project. Use `npm run dev:stack -- reset` for a clean
   database and state directory; a failed volume removal is reported and leaves
   the state in place so cleanup can be retried safely.
+- On macOS, `npm run dev:stack` repairs the execute bits on node-pty's published
+  `prebuilds/darwin-*/spawn-helper` before the CLI host starts. If you launch
+  the CLI host outside this workflow and a terminal remains `IDLE` with an
+  `EACCES` spawn error, repair that helper's execute permission first.
 - Unix socket paths are automatically shortened under the system temporary
   directory when `.dev-stack` would exceed the platform socket-path limit.
 
