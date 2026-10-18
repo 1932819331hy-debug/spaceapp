@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import {
@@ -71,6 +71,26 @@ function spawnService(config, name, command, args, env, onUnexpectedExit) {
   prefixStream(child.stderr, name, process.stderr);
   child.once("exit", (code, signal) => onUnexpectedExit(name, child, code, signal));
   return child;
+}
+
+export async function ensureDarwinNodePtySpawnHelpers(root, platform = process.platform) {
+  if (platform !== "darwin") return [];
+  const prebuilds = join(root, "node_modules", "node-pty", "prebuilds");
+  if (!existsSync(prebuilds)) return [];
+
+  const repaired = [];
+  for (const entry of await readdir(prebuilds, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("darwin-")) continue;
+    const helper = join(prebuilds, entry.name, "spawn-helper");
+    if (!existsSync(helper)) continue;
+    const info = await stat(helper);
+    const currentMode = info.mode & 0o777;
+    const desiredMode = currentMode | 0o111;
+    if (currentMode === desiredMode) continue;
+    await chmod(helper, desiredMode);
+    repaired.push(helper);
+  }
+  return repaired;
 }
 
 async function waitSupervisorExit(pid, timeoutMs = 15_000) {
@@ -200,6 +220,10 @@ export async function start(config) {
 
   const spawnChildren = async (forceBuild = false) => {
     await ensureBuild(config, forceBuild);
+    const repairedHelpers = await ensureDarwinNodePtySpawnHelpers(config.root);
+    if (repairedHelpers.length) {
+      console.log(`[dev:stack] Repaired execute permission on ${repairedHelpers.length} node-pty macOS spawn helper(s).`);
+    }
     const openCodeWrapper = await installOpenCode(config, openCodeVersion);
     const env = sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper);
     children.set("cli-host", spawnService(config, "cli-host", process.execPath, ["packages/cli-host/dist/main.js"], env, unexpectedExit));
