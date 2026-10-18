@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   assertSafeStateRoot,
   dockerResources,
+  ensureBuild,
   installOpenCode,
   parseOpenCodeVersion,
   parsePinnedImages,
@@ -32,6 +33,57 @@ import {
 } from "./dev-stack-safety.mjs";
 
 const ownership = (rootHash) => ({ version: 1, rootHash, token: "a".repeat(48) });
+
+test("captured commands wait for inherited output streams to close", async () => {
+  const delayedOutput = 'setTimeout(() => { process.stdout.write("complete output"); process.stderr.write("complete error"); }, 100)';
+  const script = `
+    require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(delayedOutput)}], { stdio: ["ignore", process.stdout, process.stderr] });
+    process.exit(0);
+  `;
+  const result = await run(process.execPath, ["-e", script], { capture: true });
+  assert.equal(result.stdout, "complete output");
+  assert.match(result.stderr, /complete error$/);
+});
+
+test("build markers ignore generated-directory timestamps but detect source changes and deletions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-build-marker-"));
+  const config = { root, buildMarker: join(root, "build.json") };
+  const source = join(root, "packages", "contracts", "src", "index.ts");
+  const artifacts = ["packages/contracts/dist/index.js", "packages/runtime/dist/index.js", "packages/db/dist/migrate.js", "packages/cli-host/dist/main.js", "apps/worker/dist/worker.js"];
+  let builds = 0;
+  try {
+    await mkdir(join(root, "packages", "contracts", "src"), { recursive: true });
+    await mkdir(join(root, "apps", "worker", "src"), { recursive: true });
+    await writeFile(source, "export const value = 1;\n");
+    const runner = async () => {
+      builds += 1;
+      for (const artifact of artifacts) {
+        const target = join(root, artifact);
+        await mkdir(join(target, ".."), { recursive: true });
+        await writeFile(target, "// built\n");
+      }
+      const future = new Date(Date.now() + 2000);
+      await utimes(join(root, "packages"), future, future);
+    };
+    await ensureBuild(config, false, runner);
+    await ensureBuild(config, false, runner);
+    assert.equal(builds, 1, "startup must not rebuild solely because dist directories were created");
+
+    await writeFile(source, "export const value = 22;\n");
+    await ensureBuild(config, false, runner);
+    assert.equal(builds, 2);
+    await rm(source);
+    await ensureBuild(config, false, runner);
+    assert.equal(builds, 3, "source deletion must invalidate the marker");
+    await rm(join(root, artifacts[0]));
+    await ensureBuild(config, false, runner);
+    assert.equal(builds, 4, "missing artifacts must trigger a build");
+    await ensureBuild(config, true, runner);
+    assert.equal(builds, 5, "explicit rebuild must remain unconditional");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("source stack derives third-party pins from canonical files", () => {
   const images = parsePinnedImages(`

@@ -105,7 +105,7 @@ export async function run(command, args, { capture = false, allowFailure = false
       child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     }
     child.once("error", rejectPromise);
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       const result = { code: code ?? 1, signal, stdout: stdout.trim(), stderr: stderr.trim() };
       if (!allowFailure && code !== 0) rejectPromise(new Error(`${command} ${args.join(" ")} failed (${code ?? signal}).${stderr ? `\n${stderr}` : ""}`));
       else resolvePromise(result);
@@ -139,27 +139,36 @@ export async function prepareState(config) {
   return { databaseUrl, sessionSecret, postgresPassword };
 }
 
-async function newestMtime(path) {
-  if (!existsSync(path)) return 0;
-  const info = await stat(path);
-  if (!info.isDirectory()) return info.mtimeMs;
-  let newest = info.mtimeMs;
-  for (const entry of await readdir(path, { withFileTypes: true })) {
-    if (["node_modules", "dist", "coverage"].includes(entry.name)) continue;
-    newest = Math.max(newest, await newestMtime(join(path, entry.name)));
-  }
-  return newest;
+async function buildSourceFingerprint(root) {
+  const inputs = [];
+  const visit = async (path) => {
+    if (!existsSync(path)) return;
+    const info = await stat(path);
+    if (!info.isDirectory()) {
+      inputs.push([relative(root, path), info.mtimeMs, info.size]);
+      return;
+    }
+    for (const name of (await readdir(path)).sort()) {
+      if (["node_modules", "dist", "coverage"].includes(name)) continue;
+      await visit(join(path, name));
+    }
+  };
+  await visit(join(root, "packages"));
+  await visit(join(root, "apps", "worker", "src"));
+  // Building creates excluded output directories, which changes parent directory
+  // mtimes. Hash source file identities instead, including paths to detect deletes.
+  return createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
 }
 
-export async function ensureBuild(config, force = false) {
+export async function ensureBuild(config, force = false, runner = run) {
   if (process.env.SPACE_DEV_SKIP_BUILD === "true" && !force) return;
   const artifacts = ["packages/contracts/dist/index.js", "packages/runtime/dist/index.js", "packages/db/dist/migrate.js", "packages/cli-host/dist/main.js", "apps/worker/dist/worker.js"].map((p) => join(config.root, p));
   const marker = existsSync(config.buildMarker) ? JSON.parse(await readFile(config.buildMarker, "utf8")) : null;
-  const sourceMtime = Math.max(await newestMtime(join(config.root, "packages")), await newestMtime(join(config.root, "apps", "worker", "src")));
-  if (!force && process.env.SPACE_DEV_FORCE_BUILD !== "true" && marker && artifacts.every(existsSync) && sourceMtime <= Number(marker.sourceMtime || 0)) return;
+  const sourceFingerprint = await buildSourceFingerprint(config.root);
+  if (!force && process.env.SPACE_DEV_FORCE_BUILD !== "true" && marker && artifacts.every(existsSync) && sourceFingerprint === marker.sourceFingerprint) return;
   console.log("[dev:stack] Building source workspaces before migrations...");
-  await run("npm", ["run", "build"], { cwd: config.root });
-  await writeFile(config.buildMarker, `${JSON.stringify({ sourceMtime, builtAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+  await runner("npm", ["run", "build"], { cwd: config.root });
+  await writeFile(config.buildMarker, `${JSON.stringify({ sourceFingerprint, builtAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
 }
 
 export async function installOpenCode(config, version) {
