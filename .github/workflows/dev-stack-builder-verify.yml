@@ -1,0 +1,89 @@
+name: Dev stack builder verification
+
+on:
+  push:
+    branches:
+      - feat/dev-stack-65
+
+permissions:
+  contents: read
+
+jobs:
+  verify-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      - name: Unit and lifecycle regression tests
+        run: npm run test:dev-stack
+
+      - name: Start full source stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run dev:stack >"$RUNNER_TEMP/dev-stack.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/dev-stack-shell.pid"
+
+      - name: Verify owner flow and OpenCode pane
+        run: npm run verify:dev-stack
+
+      - name: Verify shared-package rebuild keeps supervisor alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          json_pid() {
+            node -e 'let d=""; process.stdin.on("data", c => d += c); process.stdin.on("end", () => { const x = JSON.parse(d); if (!x.running || !x.supervisorPid) process.exit(2); process.stdout.write(String(x.supervisorPid)); });'
+          }
+          before_pid="$(npm run --silent dev:stack -- status | json_pid)"
+          before_mtime="$(stat -c %Y packages/contracts/dist/index.js)"
+          sleep 1
+          touch packages/contracts/src/index.ts
+          npm run dev:stack -- rebuild
+          timeout 300 bash -c 'until grep -q "Rebuild complete; source services are ready." "$RUNNER_TEMP/dev-stack.log"; do sleep 1; done'
+          after_pid="$(npm run --silent dev:stack -- status | json_pid)"
+          after_mtime="$(stat -c %Y packages/contracts/dist/index.js)"
+          test "$before_pid" = "$after_pid"
+          test "$after_mtime" -gt "$before_mtime"
+          curl --fail --silent --show-error "http://127.0.0.1:5910/readyz" \
+            | node -e 'let d=""; process.stdin.on("data", c => d += c); process.stdin.on("end", () => { const x = JSON.parse(d); if (x.ok !== true || x.dependencies?.worker !== "RUNNING" || x.dependencies?.cliHost !== "RUNNING") process.exit(3); });'
+
+      - name: Reset and prove cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          npm run dev:stack -- down
+          down_status=$?
+          npm run dev:stack -- reset
+          reset_status=$?
+          shell_pid="$(cat "$RUNNER_TEMP/dev-stack-shell.pid" 2>/dev/null || true)"
+          if [ -n "$shell_pid" ] && kill -0 "$shell_pid" 2>/dev/null; then
+            echo "dev-stack launcher $shell_pid still alive" >&2
+            kill "$shell_pid" 2>/dev/null || true
+            exit 1
+          fi
+          status_json="$(npm run --silent dev:stack -- status 2>/dev/null)"
+          echo "$status_json"
+          if ! echo "$status_json" | grep -q '"containers": \[\]' \
+            || ! echo "$status_json" | grep -q '"volumes": \[\]' \
+            || ! echo "$status_json" | grep -q '"networks": \[\]'; then
+            echo "owned Docker resources remain" >&2
+            exit 1
+          fi
+          echo "--- dev-stack log ---"
+          cat "$RUNNER_TEMP/dev-stack.log" 2>/dev/null || true
+          test "$down_status" -eq 0
+          test "$reset_status" -eq 0
