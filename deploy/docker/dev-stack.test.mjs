@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,13 @@ import {
   resolveConfig,
   sourceEnv
 } from "./dev-stack-lib.mjs";
+import {
+  assertSafeDevStackOverrides,
+  claimSupervisor,
+  ownedSupervisorPid,
+  releaseSupervisor,
+  supervisorRecordMatches
+} from "./dev-stack-safety.mjs";
 
 test("source stack derives third-party pins from canonical files", () => {
   const images = parsePinnedImages(`
@@ -73,6 +80,34 @@ test("unsafe state roots and installed-instance ports fail closed", async () => 
     await assert.rejects(() => resolveConfig({ SPACE_DEV_API_PORT: "4910" }, root), /reserved for an installed SpaceApp/);
     await assert.rejects(() => resolveConfig({ SPACE_DEV_API_PORT: "6000", SPACE_DEV_WEB_PORT: "6000" }, root), /conflicts/);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("destructive ownership selectors cannot be overridden", () => {
+  assert.doesNotThrow(() => assertSafeDevStackOverrides({}));
+  assert.throws(() => assertSafeDevStackOverrides({ SPACE_DEV_STACK_DIR: "/tmp/shared" }), /SPACE_DEV_STACK_DIR/);
+  assert.throws(() => assertSafeDevStackOverrides({ SPACE_DEV_COMPOSE_PROJECT: "someone-elses-project" }), /SPACE_DEV_COMPOSE_PROJECT/);
+});
+
+test("supervisor identity rejects PID reuse and atomically claims a checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "spaceapp-supervisor-test-"));
+  const config = {
+    rootHash: "0123456789",
+    pidFile: join(root, "supervisor.pid")
+  };
+  const ownedIdentity = async () => ({ startedAt: "Sun Oct 18 07:40:00 2026", args: "node deploy/docker/dev-stack.mjs" });
+  try {
+    const record = await claimSupervisor(config, ownedIdentity);
+    assert.equal(record.pid, process.pid);
+    assert.equal(JSON.parse(await readFile(config.pidFile, "utf8")).rootHash, config.rootHash);
+    assert.equal(supervisorRecordMatches(config, record, await ownedIdentity()), true);
+    await assert.rejects(() => claimSupervisor(config, ownedIdentity), /already running/);
+
+    const reusedIdentity = async () => ({ startedAt: "Sun Oct 18 07:41:00 2026", args: "node unrelated-tool.mjs" });
+    await assert.rejects(() => ownedSupervisorPid(config, { identityProvider: reusedIdentity }), /Refusing to signal PID/);
+  } finally {
+    await releaseSupervisor(config, process.pid).catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });
