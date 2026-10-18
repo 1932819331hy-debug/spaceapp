@@ -71,10 +71,12 @@ export async function ownedSupervisorPid(config, { strict = true, identityProvid
 
 export async function claimSupervisor(config, identityProvider = processIdentity) {
   const existing = await readSupervisorRecord(config);
-  if (existing && await isOwnedSupervisor(config, existing, identityProvider)) {
-    throw new Error(`Dev stack is already running under supervisor ${existing.pid}.`);
+  if (existing) {
+    if (await isOwnedSupervisor(config, existing, identityProvider)) {
+      throw new Error(`Dev stack is already running under supervisor ${existing.pid}.`);
+    }
+    throw new Error("A stale or unverified dev-stack supervisor record exists. Run `npm run dev:stack -- status` (or `down`) to clear a dead record before starting again; live unowned PIDs are never signalled or replaced.");
   }
-  if (existing) await rm(config.pidFile, { force: true });
 
   const identity = await identityProvider(process.pid);
   if (!identity?.startedAt) throw new Error("Could not establish dev-stack supervisor process identity.");
