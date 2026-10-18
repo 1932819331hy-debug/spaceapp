@@ -1,0 +1,274 @@
+import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+export const repoRoot = resolve(here, "../..");
+export const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+function parsePort(raw, fallback, name) {
+  const value = raw == null || raw === "" ? fallback : Number(raw);
+  if (!Number.isInteger(value) || value < 1024 || value > 65535) {
+    throw new Error(`${name} must be an integer port between 1024 and 65535.`);
+  }
+  return value;
+}
+
+function inside(parent, child) {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+export async function assertSafeStateRoot(stateRoot, root = repoRoot) {
+  const value = resolve(stateRoot);
+  const repo = resolve(root);
+  const home = resolve(homedir());
+  if (value === resolve(sep) || value === repo || value === home) throw new Error(`Unsafe dev-stack state directory: ${value}`);
+  if (inside(value, repo) && value !== repo) throw new Error("The dev-stack state directory may not be an ancestor of the repository.");
+  if (existsSync(value) && (await lstat(value)).isSymbolicLink()) throw new Error("The dev-stack state directory may not be a symlink.");
+  return value;
+}
+
+export function parsePinnedImages(text) {
+  const postgres = text.match(/image:\s*(pgvector\/pgvector:[^\s]+@sha256:[a-f0-9]{64})/i)?.[1];
+  const temporal = text.match(/image:\s*(temporalio\/auto-setup:[^\s]+@sha256:[a-f0-9]{64})/i)?.[1];
+  if (!postgres || !temporal) throw new Error("Could not read digest-pinned PostgreSQL and Temporal images from the launcher Compose template.");
+  return { postgres, temporal };
+}
+
+export function parseOpenCodeVersion(text) {
+  const version = text.match(/opencode-ai@([0-9]+\.[0-9]+\.[0-9]+)/)?.[1];
+  if (!version) throw new Error("Could not read the pinned opencode-ai version from Dockerfile.");
+  return version;
+}
+
+export async function resolveConfig(env = process.env, root = repoRoot) {
+  const rootHash = createHash("sha256").update(await realpath(root)).digest("hex").slice(0, 10);
+  const stateRoot = await assertSafeStateRoot(env.SPACE_DEV_STACK_DIR || join(root, ".dev-stack"), root);
+  const ports = {
+    api: parsePort(env.SPACE_DEV_API_PORT, 5910, "SPACE_DEV_API_PORT"),
+    web: parsePort(env.SPACE_DEV_WEB_PORT, 5911, "SPACE_DEV_WEB_PORT"),
+    postgres: parsePort(env.SPACE_DEV_POSTGRES_PORT, 55432, "SPACE_DEV_POSTGRES_PORT"),
+    temporal: parsePort(env.SPACE_DEV_TEMPORAL_PORT, 57233, "SPACE_DEV_TEMPORAL_PORT")
+  };
+  const seen = new Map();
+  for (const [name, value] of Object.entries(ports)) {
+    if (seen.has(value)) throw new Error(`${name} conflicts with ${seen.get(value)} on port ${value}.`);
+    seen.set(value, name);
+  }
+  for (const [name, value] of [["api", ports.api], ["web", ports.web]]) {
+    if (value === 4910 || value === 4911) throw new Error(`${name} port ${value} is reserved for an installed SpaceApp.`);
+  }
+  const project = env.SPACE_DEV_COMPOSE_PROJECT || `spaceapp-dev-${rootHash}`;
+  if (!/^[a-z0-9][a-z0-9_-]{2,50}$/i.test(project)) throw new Error("SPACE_DEV_COMPOSE_PROJECT contains unsupported characters.");
+  const preferredSocket = join(stateRoot, "run", "cli-host.sock");
+  const socketPath = Buffer.byteLength(preferredSocket) <= 96 ? preferredSocket : join(tmpdir(), `spaceapp-dev-${rootHash}`, "cli-host.sock");
+  return {
+    root, rootHash, stateRoot, project, ports, socketPath,
+    composeFile: join(stateRoot, "compose.yml"),
+    configFile: join(stateRoot, "config.json"),
+    pidFile: join(stateRoot, "supervisor.pid"),
+    buildMarker: join(stateRoot, "build-marker.json"),
+    secretsDir: join(stateRoot, "secrets"),
+    binDir: join(stateRoot, "bin"),
+    vendorDir: join(stateRoot, "vendor", "opencode"),
+    providerRoot: join(stateRoot, "providers", "opencode"),
+    workspacesRoot: join(stateRoot, "workspaces"),
+    memoryRoot: join(stateRoot, "memory"),
+    memoryGraphRoot: join(stateRoot, "memory-graph"),
+    artifactRoot: join(stateRoot, "artifacts"),
+    projectsRoot: join(stateRoot, "projects"),
+    diagnosticsRoot: join(stateRoot, "diagnostics"),
+    openCodeChatRoot: join(stateRoot, "opencode-chat")
+  };
+}
+
+export function renderCompose(config, images) {
+  return `services:\n  postgres:\n    image: ${images.postgres}\n    restart: unless-stopped\n    environment:\n      POSTGRES_DB: spaceapp_dev\n      POSTGRES_USER: spaceapp\n      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password\n    ports:\n      - \"127.0.0.1:${config.ports.postgres}:5432\"\n    secrets: [postgres-password]\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U spaceapp -d spaceapp_dev\"]\n      interval: 2s\n      timeout: 3s\n      retries: 30\n  temporal:\n    image: ${images.temporal}\n    restart: unless-stopped\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      DB: postgres12\n      DB_PORT: 5432\n      POSTGRES_USER: spaceapp\n      POSTGRES_SEEDS: postgres\n      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml\n    entrypoint: [\"/bin/sh\", \"-ec\"]\n    command:\n      - export POSTGRES_PWD=\"$$(cat /run/secrets/postgres-password)\"; exec /etc/temporal/entrypoint.sh autosetup\n    ports:\n      - \"127.0.0.1:${config.ports.temporal}:7233\"\n    secrets: [postgres-password]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"temporal operator cluster health --address temporal:7233 >/dev/null && temporal operator namespace describe --namespace default --address temporal:7233 >/dev/null\"]\n      interval: 3s\n      timeout: 5s\n      retries: 40\nsecrets:\n  postgres-password:\n    file: ./secrets/postgres-password\nvolumes:\n  postgres-data:\n`;
+}
+
+export async function run(command, args, { capture = false, allowFailure = false, env = process.env, cwd = repoRoot } = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { cwd, env, stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit" });
+    let stdout = "";
+    let stderr = "";
+    if (capture) {
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    }
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => {
+      const result = { code: code ?? 1, signal, stdout: stdout.trim(), stderr: stderr.trim() };
+      if (!allowFailure && code !== 0) rejectPromise(new Error(`${command} ${args.join(" ")} failed (${code ?? signal}).${stderr ? `\n${stderr}` : ""}`));
+      else resolvePromise(result);
+    });
+  });
+}
+
+export function composeArgs(config, ...args) {
+  return ["compose", "-p", config.project, "-f", config.composeFile, ...args];
+}
+export const compose = (config, args, options = {}) => run("docker", composeArgs(config, ...args), options);
+
+async function privateFile(path, value) {
+  if (!existsSync(path)) await writeFile(path, `${value}\n`, { mode: 0o600, flag: "wx" });
+  await chmod(path, 0o600);
+}
+
+export async function prepareState(config) {
+  for (const path of [config.stateRoot, config.secretsDir, dirname(config.socketPath), config.binDir, config.vendorDir, config.providerRoot,
+    config.workspacesRoot, config.memoryRoot, config.memoryGraphRoot, config.artifactRoot, config.projectsRoot, config.diagnosticsRoot, config.openCodeChatRoot]) {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+  }
+  await privateFile(join(config.secretsDir, "postgres-password"), randomBytes(24).toString("base64url"));
+  await privateFile(join(config.secretsDir, "session-secret"), randomBytes(32).toString("hex"));
+  await privateFile(join(config.secretsDir, "setup-token"), randomBytes(32).toString("hex"));
+  const password = (await readFile(join(config.secretsDir, "postgres-password"), "utf8")).trim();
+  const sessionSecret = (await readFile(join(config.secretsDir, "session-secret"), "utf8")).trim();
+  const databaseUrl = `postgresql://spaceapp:${encodeURIComponent(password)}@127.0.0.1:${config.ports.postgres}/spaceapp_dev`;
+  await writeFile(join(config.secretsDir, "database-url"), `${databaseUrl}\n`, { mode: 0o600 });
+  await chmod(join(config.secretsDir, "database-url"), 0o600);
+  return { databaseUrl, sessionSecret };
+}
+
+async function newestMtime(path) {
+  if (!existsSync(path)) return 0;
+  const info = await stat(path);
+  if (!info.isDirectory()) return info.mtimeMs;
+  let newest = info.mtimeMs;
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    if (["node_modules", "dist", "coverage"].includes(entry.name)) continue;
+    newest = Math.max(newest, await newestMtime(join(path, entry.name)));
+  }
+  return newest;
+}
+
+export async function ensureBuild(config, force = false) {
+  if (process.env.SPACE_DEV_SKIP_BUILD === "true" && !force) return;
+  const artifacts = ["packages/contracts/dist/index.js", "packages/runtime/dist/index.js", "packages/db/dist/migrate.js", "packages/cli-host/dist/main.js", "apps/worker/dist/worker.js"].map((p) => join(config.root, p));
+  const marker = existsSync(config.buildMarker) ? JSON.parse(await readFile(config.buildMarker, "utf8")) : null;
+  const sourceMtime = Math.max(await newestMtime(join(config.root, "packages")), await newestMtime(join(config.root, "apps", "worker", "src")));
+  if (!force && process.env.SPACE_DEV_FORCE_BUILD !== "true" && marker && artifacts.every(existsSync) && sourceMtime <= Number(marker.sourceMtime || 0)) return;
+  console.log("[dev:stack] Building source workspaces before migrations...");
+  await run("npm", ["run", "build"], { cwd: config.root });
+  await writeFile(config.buildMarker, `${JSON.stringify({ sourceMtime, builtAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
+}
+
+export async function installOpenCode(config, version) {
+  const packageJson = join(config.vendorDir, "node_modules", "opencode-ai", "package.json");
+  let installed = null;
+  if (existsSync(packageJson)) {
+    try { installed = JSON.parse(await readFile(packageJson, "utf8")).version; } catch {}
+  }
+  if (installed !== version) {
+    await rm(config.vendorDir, { recursive: true, force: true });
+    await mkdir(config.vendorDir, { recursive: true, mode: 0o700 });
+    console.log(`[dev:stack] Installing pinned opencode-ai@${version} into dev state...`);
+    await run("npm", ["install", "--prefix", config.vendorDir, "--no-package-lock", "--no-save", "--no-audit", "--no-fund", `opencode-ai@${version}`]);
+  }
+  const wrapper = join(config.binDir, "opencode-vscode-parity");
+  const binary = join(config.vendorDir, "node_modules", ".bin", "opencode");
+  await writeFile(wrapper, `#!/bin/sh\nset -eu\nexport HOME=${JSON.stringify(join(config.providerRoot, "home"))}\nexport XDG_CONFIG_HOME=${JSON.stringify(join(config.providerRoot, "config"))}\nexport XDG_DATA_HOME=${JSON.stringify(join(config.providerRoot, "data"))}\nexport XDG_CACHE_HOME=${JSON.stringify(join(config.providerRoot, "cache"))}\nexec ${JSON.stringify(binary)} \"$@\"\n`, { mode: 0o700 });
+  await chmod(wrapper, 0o700);
+  return wrapper;
+}
+
+export async function waitHealthy(config, service, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const id = (await compose(config, ["ps", "-q", service], { capture: true })).stdout;
+    if (id) {
+      const status = await run("docker", ["inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", id], { capture: true, allowFailure: true });
+      if (status.stdout === "healthy") return;
+      if (["unhealthy", "exited", "dead"].includes(status.stdout)) throw new Error(`${service} became ${status.stdout}.`);
+    }
+    await sleep(1000);
+  }
+  throw new Error(`${service} did not become healthy within ${Math.round(timeoutMs / 1000)} seconds.`);
+}
+
+export async function ensureTemporalNamespace(config) {
+  const base = ["exec", "-T", "temporal", "temporal", "operator", "namespace"];
+  const described = await compose(config, [...base, "describe", "--namespace", "spaceapp-dev", "--address", "temporal:7233"], { capture: true, allowFailure: true });
+  if (described.code !== 0) await compose(config, [...base, "create", "--namespace", "spaceapp-dev", "--address", "temporal:7233"]);
+}
+
+export function sourceEnv(config, databaseUrl, sessionSecret, openCodeWrapper) {
+  const env = { ...process.env };
+  for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROK_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]) delete env[key];
+  return {
+    ...env,
+    SPACE_INSTANCE: "dev",
+    SPACE_INSTALL_ROOT: config.root,
+    SPACE_RUNTIME_STORE: "postgres",
+    SPACE_DATABASE_URL: databaseUrl,
+    SPACE_SESSION_SECRET: sessionSecret,
+    SPACE_SETUP_TOKEN_FILE: join(config.secretsDir, "setup-token"),
+    SPACE_DEV_LOGIN: "false",
+    SPACE_GOOGLE_AUTH_DISABLED: "true",
+    SPACE_PUBLIC_DISTRIBUTION: "true",
+    SPACE_OPTIONAL_MODULES: "none",
+    SPACEAPP_WORKFLOWS_ENABLED: "true",
+    SPACE_API_HOST: "127.0.0.1",
+    SPACE_API_PORT: String(config.ports.api),
+    SPACE_WEB_HOST: "127.0.0.1",
+    SPACE_WEB_PORT: String(config.ports.web),
+    SPACE_API_ORIGIN: `http://127.0.0.1:${config.ports.api}`,
+    SPACE_TEMPORAL_ADDRESS: `127.0.0.1:${config.ports.temporal}`,
+    SPACE_TEMPORAL_NAMESPACE: "spaceapp-dev",
+    SPACE_TEMPORAL_TASK_QUEUE: "space-dev-agent-turns",
+    SPACE_CLI_ENABLED: "true",
+    SPACE_CLI_HOST_SOCKET: config.socketPath,
+    SPACE_CLI_COMMAND_PATH: config.binDir,
+    SPACE_CLI_OPENCODE_COMMAND: openCodeWrapper,
+    SPACE_CLI_WORKSPACE_ROOT: config.workspacesRoot,
+    SPACE_CLI_ROOT_ENABLED: "false",
+    SPACE_BROWSER_SESSIONS_ENABLED: "false",
+    SPACE_BROWSER_HOST_TRANSPORT: "in-process",
+    SPACE_MEMORY_ROOT: config.memoryRoot,
+    SPACE_MEMORY_GRAPH_ROOT: config.memoryGraphRoot,
+    SPACE_ARTIFACT_ROOT: config.artifactRoot,
+    SPACE_PROJECTS_ROOT: config.projectsRoot,
+    SPACE_APP_DIAGNOSTICS_ROOT: config.diagnosticsRoot,
+    SPACE_OPENCODE_CHAT_STATE_ROOT: config.openCodeChatRoot,
+    SPACE_ENABLE_DUMMY_TURNS: "false",
+    SPACE_ROOM_AGENT_AUTOPILOT_ENABLED: "false"
+  };
+}
+
+export async function waitReady(config, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${config.ports.api}/readyz`);
+      if (response.ok) {
+        const body = await response.json();
+        if (body.ok === true && body.dependencies?.database === "RUNNING" && body.dependencies?.worker === "RUNNING" && body.dependencies?.cliHost === "RUNNING") return body;
+      }
+    } catch {}
+    await sleep(500);
+  }
+  throw new Error("The source stack did not reach /readyz with database, worker and CLI host RUNNING.");
+}
+
+export function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error?.code === "ESRCH") return false; throw error; }
+}
+
+export async function readSupervisorPid(config) {
+  if (!existsSync(config.pidFile)) return null;
+  const value = Number.parseInt((await readFile(config.pidFile, "utf8")).trim(), 10);
+  return Number.isInteger(value) ? value : null;
+}
+
+export async function dockerResources(config) {
+  const containers = await run("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${config.project}`], { capture: true, allowFailure: true });
+  const volumes = await run("docker", ["volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${config.project}`], { capture: true, allowFailure: true });
+  return { containers: containers.stdout.split(/\s+/).filter(Boolean), volumes: volumes.stdout.split(/\s+/).filter(Boolean) };
+}
