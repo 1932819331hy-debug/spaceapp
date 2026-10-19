@@ -7,6 +7,15 @@ import { promisify } from "node:util";
 const executeFile = promisify(execFile);
 const powershell = win32.join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 
+function windowsPowerShellEnvironment(values) {
+  const environment = { ...process.env, ...values };
+  for (const name of Object.keys(environment)) {
+    if (name.toUpperCase() === "PSMODULEPATH") delete environment[name];
+  }
+  environment.PSModulePath = win32.join(win32.dirname(powershell), "Modules");
+  return environment;
+}
+
 // Independent readback: do not use the production permission setter or its
 // success marker to decide whether the resulting file is private.
 export async function windowsAcl(path) {
@@ -22,7 +31,7 @@ $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentif
    currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
    protected = $acl.AreAccessRulesProtected; rules = $rules } | ConvertTo-Json -Depth 4 -Compress
 `
-  ], { env: { ...process.env, SPACEAPP_TEST_ACL_PATH: path }, windowsHide: true, timeout: 30_000 });
+  ], { env: windowsPowerShellEnvironment({ SPACEAPP_TEST_ACL_PATH: path }), windowsHide: true, timeout: 30_000 });
   return JSON.parse(stdout.trim());
 }
 
@@ -68,12 +77,11 @@ $acl.AddAccessRule($rule)
 Set-Acl -LiteralPath $path -AclObject $acl
 `
   ], {
-    env: {
-      ...process.env,
+    env: windowsPowerShellEnvironment({
       SPACEAPP_TEST_ACL_PATH: path,
       SPACEAPP_TEST_ACL_DIRECTORY: directory ? "1" : "0",
       SPACEAPP_TEST_ACL_WRITABLE: writable ? "1" : "0"
-    },
+    }),
     windowsHide: true,
     timeout: 30_000
   });

@@ -119,6 +119,8 @@ test("Windows permission enforcement fails closed on process failure or unverifi
   } }), /Cannot enforce/);
   assert.ok(win32.isAbsolute(invocation[0]), "ACL enforcement must not search the working directory or PATH");
   assert.equal(win32.basename(invocation[0]), "powershell.exe");
+  assert.deepEqual(Object.keys(invocation[2].env).filter((name) => name.toUpperCase() === "PSMODULEPATH"), ["PSModulePath"]);
+  assert.equal(invocation[2].env.PSModulePath, win32.join(win32.dirname(invocation[0]), "Modules"), "Windows PowerShell must not inherit PowerShell 7 module paths through Node");
   assert.equal(invocation[2].env.SPACEAPP_PRIVATE_PATH, path);
   assert.ok(!invocation[1].at(-1).includes(path), "The path must never become PowerShell code");
 });

@@ -120,11 +120,15 @@ export async function restrictPrivatePath(path, {
     const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
     if (!/^[A-Za-z]:[\\/]/.test(systemRoot)) throw new Error("SystemRoot must be an absolute Windows drive path.");
     const executable = win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    // A Node process launched by PowerShell 7 inherits its incompatible module
+    // paths. Windows environment keys are case-insensitive; replace every form.
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PSMODULEPATH"));
     const result = await execute(executable, [
       "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_PRIVATE_ACL_SCRIPT
     ], {
       env: {
-        ...process.env,
+        ...environment,
+        PSModulePath: win32.join(win32.dirname(executable), "Modules"),
         SPACEAPP_PRIVATE_PATH: path,
         SPACEAPP_PRIVATE_DIRECTORY: directory ? "1" : "0",
         SPACEAPP_PRIVATE_CREATE_DIRECTORY: createDirectory ? "1" : "0",
