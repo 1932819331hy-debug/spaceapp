@@ -22,9 +22,28 @@ describe("pane model pick at CLI launch", () => {
     expect(env.SPACE_CLI_REASONING_EFFORT).toBeUndefined();
   });
 
+  it("starts Oh My Pi on Space's default too, so its own config default never decides", () => {
+    const fallback = findCliRuntimeDescriptor("cli:omp")!.defaultModelId;
+    const env = buildCliEnvironment(config, { runtimeId: "cli:omp", modelId: fallback, reasoningEffort: "high" });
+    expect(env.SPACE_CLI_MODEL_ID).toBe("space-gateway/gpt-6-sol");
+    expect(env.SPACE_CLI_REASONING_EFFORT).toBe("high");
+  });
+
   it("leaves Codex, Claude, Gemini and catalog-family runtimes on their own launch paths", () => {
     for (const runtimeId of ["cli:codex", "cli:claude", "cli:gemini", "cli:cursor", "cli:opencode"]) {
       expect(buildCliEnvironment(config, { runtimeId, modelId: "provider/picked-model" }).SPACE_CLI_MODEL_ID, runtimeId).toBeUndefined();
+    }
+  });
+
+  it("passes the configured source-stack memory root to OpenCode", () => {
+    const previousRoot = process.env.SPACE_MEMORY_ROOT;
+    process.env.SPACE_MEMORY_ROOT = "/tmp/source-opencode-memory";
+    try {
+      const env = buildCliEnvironment(config, { runtimeId: "cli:opencode" });
+      expect(env.SPACE_MEMORY_ROOT).toBe("/tmp/source-opencode-memory");
+    } finally {
+      if (previousRoot === undefined) delete process.env.SPACE_MEMORY_ROOT;
+      else process.env.SPACE_MEMORY_ROOT = previousRoot;
     }
   });
 });
