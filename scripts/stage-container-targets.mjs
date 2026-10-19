@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve(dirname(scriptPath), "..");
 const nodeBuiltinNames = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
+const excludedOptionalUrlResources = new Map([
+  ["scripts/space-media-capture.mjs", "The optional media-capture helper is intentionally absent from the public source tree."],
+  ["scripts/space-design-render.mjs", "Design is an optional public module disabled by default, but its renderer is excluded from the public source tree; manually enabling Design rendering remains unsupported."]
+]);
 
 export const containerTargetDefinitions = Object.freeze({
   core: {
@@ -18,6 +22,7 @@ export const containerTargetDefinitions = Object.freeze({
     ],
     extraPaths: [
       "apps/web/dist",
+      "apps/web/public/brand",
       "apps/api/package.json",
       "apps/api/dist/databases/sqlite-worker.py",
       "agent-skills",
@@ -208,6 +213,7 @@ export async function stageContainerTarget({ source = repoRoot, output, target }
   const copiedWorkspaces = new Set();
   const copiedExternal = new Set();
   const resolutionEdges = [];
+  const excludedOptionalResources = [];
   const pendingFiles = definition.entrypoints.map((path) => resolve(sourceRoot, path));
   const outputNodeModules = join(targetRoot, "node_modules");
   const sourceNodeModules = join(sourceRoot, "node_modules");
@@ -310,9 +316,21 @@ export async function stageContainerTarget({ source = repoRoot, output, target }
     try {
       pendingFiles.push(await resolveRelativeFile(sourceRoot, basePath, resource.path));
     } catch (error) {
-      // This optional media-capture helper is intentionally absent from the public source tree.
-      // Keep the pre-existing optional route importable without making image builds fail.
-      if (target === "core" && resource.path.endsWith("scripts/space-media-capture.mjs")) return;
+      const sourceRelative = relative(sourceRoot, resolve(dirname(basePath), resource.path));
+      const missingExactResource = error instanceof Error &&
+        error.message === `Cannot resolve local runtime import ${resource.path} from ${basePath}`;
+      const reason = excludedOptionalUrlResources.get(sourceRelative);
+      // Only the exact public-export omissions are optional. Record them for auditability;
+      // every other missing URL resource remains a staging error.
+      if (target === "core" && missingExactResource && reason) {
+        excludedOptionalResources.push({
+          path: sourceRelative,
+          importer: relative(sourceRoot, importerPath),
+          resource: resource.path,
+          reason
+        });
+        return;
+      }
       throw error;
     }
   }
@@ -346,7 +364,9 @@ export async function stageContainerTarget({ source = repoRoot, output, target }
   await writeFile(join(targetRoot, "container-runtime-manifest.json"), JSON.stringify({
     target,
     stagedPaths,
-    resolutionEdges
+    resolutionEdges,
+    excludedOptionalResources: excludedOptionalResources.sort((a, b) =>
+      a.path.localeCompare(b.path) || a.importer.localeCompare(b.importer))
   }, null, 2) + "\n");
   return {
     target,
