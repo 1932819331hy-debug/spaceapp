@@ -18,6 +18,7 @@ import {
   stripTrailingLineEndings
 } from "./string-utils.mjs";
 import { UNIVERSAL_COMMAND } from "./package-info.mjs";
+import { mkdirPrivate } from "./private-files.mjs";
 
 const CONFIG_SCHEMA_VERSION = 4;
 const CONTAINER_SECRET_MODE = 0o644;
@@ -583,7 +584,7 @@ export async function writeCredential(root, provider, value, { userId } = {}) {
     throw new Error("Credential value cannot be empty or contain null bytes.");
   }
   const credentialsRoot = providerSecretsRoot(root, userId);
-  await mkdir(credentialsRoot, { recursive: true, mode: 0o700 });
+  await mkdirPrivate(credentialsRoot);
   const target = join(credentialsRoot, `${provider}.key`);
   await atomicWrite(target, normalized);
   return target;
@@ -918,7 +919,7 @@ export async function writeRuntimeFiles(root, config) {
   await atomicWrite(join(root, "compose.workspaces.yml"), renderWorkspaceCompose(config, { cliSandbox: await userNamespacesUsable() }));
   // The core reads it as uid 10001 through a read-only bind mount.
   await atomicWrite(join(root, "cli-hosts.json"), renderCliHosts(config), 0o644);
-  for (const user of config.users ?? []) await mkdir(providerSecretsRoot(root, user.id), { recursive: true, mode: 0o700 });
+  for (const user of config.users ?? []) await mkdirPrivate(providerSecretsRoot(root, user.id));
   await atomicWrite(join(root, "compose.host-access.yml"), renderHostAccessCompose(config));
 }
 
@@ -932,7 +933,7 @@ export async function prepareInstallation(root, {
   await mkdir(root, { recursive: true, mode: 0o700 });
   await Promise.all([
     mkdir(join(root, "backups"), { recursive: true, mode: 0o700 }),
-    mkdir(join(root, "secrets", "providers"), { recursive: true, mode: 0o700 })
+    mkdirPrivate(join(root, "secrets", "providers"))
   ]);
   const resolvedProfile = profile === undefined
     ? undefined

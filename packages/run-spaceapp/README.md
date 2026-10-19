@@ -123,6 +123,21 @@ restrictive files outside Git. OAuth and device-code credentials remain in
 isolated Docker provider state. Neither credential source is included in
 portable SpaceApp backups.
 
+On Windows, provider-key directories and the CLI-settings/Space-Memory backup
+archives use DACLs restricted to the current Windows account, SYSTEM, and local
+Administrators. The launcher verifies the DACL before writing new private data;
+if PowerShell or the filesystem cannot enforce it, that operation stops. Backup
+exports are staged in a protected directory and retain a protected file DACL
+when moved to their final name. POSIX hosts keep `0700` directories and `0600`
+private files.
+
+Keep `SPACEAPP_HOME` and its ancestor paths under your account's or system
+administrators' control. On Windows the launcher refuses a private directory
+or its nearest existing parent if another account can write to or replace it;
+public read-only access to the parent is allowed. New private directories carry
+their protected DACL at creation. This does not protect against an account that
+can replace a higher ancestor path or administer the machine.
+
 Claude Code is not redistributed in SpaceApp images. Install the reviewed
 package as an explicit owner action with:
 

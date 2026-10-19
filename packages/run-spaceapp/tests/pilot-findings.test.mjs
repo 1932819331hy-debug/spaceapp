@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test from "node:test";
 import { run } from "../src/cli.mjs";
+import { assertPrivatePath } from "./helpers/private-path.mjs";
 
 // Findings of the 2026-10-16 pilot rehearsal: workspace changes reach the running services (F1), Linux shows how
 // the CLIs get write access (F3), backups carry the workspace list and CLI settings (F8), purge runs unattended (F9).
@@ -38,17 +39,24 @@ test("workspace add and remove apply the mounts to the running core and CLI serv
   const calls = [];
   const { stdout, options } = await installation(async (spec) => { calls.push(spec.args); return 0; });
   const folder = await mkdtemp(join(tmpdir(), "spaceapp-pilot-repo-"));
-  await chmod(folder, 0o755);
-  assert.equal(await run(["workspace", "add", folder], options), 0);
+  // A simulated Linux platform must use Linux metadata, including on Windows.
+  // The real host directory is still used by addWorkspace and Compose rendering.
+  const linuxOptions = { ...options, workspaceMetadata: async (path) => {
+    assert.equal(path, folder);
+    return { uid: 42, mode: 0o40755 };
+  } };
+  assert.equal(await run(["workspace", "add", folder], linuxOptions), 0);
   assert.deepEqual(calls.at(-1).slice(-4), ["up", "-d", "spaceapp-core", "spaceapp-cli"]);
   assert.match(stdout.value(), /uid 10001 and cannot write/);
-  assert.match(stdout.value(), new RegExp(`setfacl -R -m u:10001:rwX .*${folder}`));
+  assert.match(stdout.value(), /setfacl -R -m u:10001:rwX/);
+  assert.ok(stdout.value().includes(JSON.stringify(folder)));
   assert.equal(await run(["workspace", "remove", folder], options), 0);
   assert.deepEqual(calls.at(-1).slice(-4), ["up", "-d", "spaceapp-core", "spaceapp-cli"]);
 
   const before = stdout.value().length;
-  await chmod(folder, 0o777);
-  assert.equal(await run(["workspace", "add", folder, "--read-only"], options), 0);
+  assert.equal(await run(["workspace", "add", folder, "--read-only"], {
+    ...options, workspaceMetadata: async () => { assert.fail("Read-only mounts need no write-access inspection"); }
+  }), 0);
   assert.doesNotMatch(stdout.value().slice(before), /setfacl/);
 });
 
@@ -78,7 +86,7 @@ test("a backup carries the workspace list and the CLI settings, and restore brin
   assert.equal(await run(["backup"], fixture.options), 0);
   const directory = join(root, "backups", "spaceapp-backup-20261016T070000000Z");
   assert.equal(await readFile(join(directory, "cli-config.tar.gz"), "utf8"), "cli-settings-archive");
-  assert.equal((await stat(join(directory, "cli-config.tar.gz"))).mode & 0o777, 0o600);
+  await assertPrivatePath(join(directory, "cli-config.tar.gz"), { protectedDacl: true });
   assert.deepEqual(JSON.parse(await readFile(join(directory, "spaceapp-config.json"), "utf8")).workspaces.map((w) => w.hostPath), [folder]);
 
   await run(["workspace", "remove", folder], fixture.options);

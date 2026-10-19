@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test from "node:test";
 import { run } from "../src/cli.mjs";
 import { addUser, createDefaultConfig, loadConfig, renderCliHosts, renderWorkspaceCompose, userSlug, validateConfig } from "../src/index.mjs";
+import { assertPrivatePath } from "./helpers/private-path.mjs";
 
 // Multi-user (plan clipboard:evAaFYqrgDfd step 5): each user's CLIs run in their own container with their own keys,
 // logins, memory and workspaces; the core reads the user -> pane host socket map from SPACE_CLI_HOST_SOCKETS_FILE.
@@ -66,7 +67,7 @@ test("user enable, add and remove give each user a CLI container and the core it
   assert.match(renderWorkspaceCompose(await loadConfig(root), { cliSandbox: true }), new RegExp(`  spaceapp-cli-${slug}:[^]*?no-new-privileges:true\\n      - seccomp=\\./seccomp-cli\\.json\\n      - apparmor=unconfined`));
   assert.match(compose, new RegExp(`\\nnetworks:\\n  spaceapp-user-${slug}: \\{\\}`));
   assert.deepEqual(JSON.parse(await readFile(join(root, "cli-hosts.json"), "utf8")), { "user:Bob12345": `/run/spaceapp-cli-users/${slug}/host.sock` });
-  assert.equal((await stat(join(root, "secrets", "users", slug, "providers"))).mode & 0o777, 0o700);
+  await assertPrivatePath(join(root, "secrets", "users", slug, "providers"), { directory: true });
   assert.match(stdout.value(), /credentials set <provider> --user user:Bob12345/);
 
   assert.equal(await run(["user", "remove", "user:Bob12345"], options), 0);
@@ -164,7 +165,7 @@ test("a backup keeps each user's CLI settings and Space Memory, never their keys
   const directory = join(root, "backups", "spaceapp-backup-20261017T080000000Z");
   assert.equal(await readFile(join(directory, "users", `${slug}-cli-config.tar.gz`), "utf8"), `spaceapp-cli-${slug}:settings`);
   assert.equal(await readFile(join(directory, "users", `${slug}-memory.tar.gz`), "utf8"), `spaceapp-cli-${slug}:memory`);
-  assert.equal((await stat(join(directory, "users", `${slug}-memory.tar.gz`))).mode & 0o777, 0o600);
+  await assertPrivatePath(join(directory, "users", `${slug}-memory.tar.gz`), { protectedDacl: true });
   assert.match(fixture.stdout.value(), /CLI settings and Space Memory of 1 of 1 user\(s\)/);
   // The user is still there: a restore puts their state straight back into their own container.
   assert.equal(await run(["restore"], { ...fixture.options, stdin: Readable.from(["RESTORE\n"]) }), 0);

@@ -10,6 +10,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile
@@ -48,6 +49,7 @@ import {
   writeSetupToken
 } from "./index.mjs";
 import { inspectStoragePlan, storageChecks } from "./storage.mjs";
+import { createPrivateStagingFile, mkdirPrivate } from "./private-files.mjs";
 import {
   ensureDockerAvailable,
   prepareDockerCliPath,
@@ -273,6 +275,7 @@ export async function run(argv, {
   stdin = process.stdin,
   execute = executeCommand,
   inspectResources = inspectSystemResources,
+  workspaceMetadata = stat,
   ensureDocker = ensureDockerAvailable,
   prepareDockerPath = prepareDockerCliPath,
   request = globalThis.fetch,
@@ -463,7 +466,7 @@ export async function run(argv, {
     return factoryResetCommand({ root, config, platform, stdin, stdout, stderr, execute: runtimeExecute, runtimeVersion, persistSetupToken });
   }
   if (command === "workspace") {
-    return workspaceCommand(args, { root, config, platform, stdin, stdout, stderr, execute: runtimeExecute });
+    return workspaceCommand(args, { root, config, platform, stdin, stdout, stderr, execute: runtimeExecute, workspaceMetadata });
   }
   if (command === "credentials") {
     return credentialsCommand(args, { root, config, stdin, stdout, stderr, execute: runtimeExecute });
@@ -1746,7 +1749,7 @@ function assertRegisteredUser(config, userId) {
   }
 }
 
-async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout, stderr, execute }) {
+async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout, stderr, execute, workspaceMetadata }) {
   const { userId, args } = takeUserOption(rawArgs);
   if (userId) assertRegisteredUser(config, userId);
   const [action, identity, ...rest] = args;
@@ -1767,7 +1770,7 @@ async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout
     await saveConfig(root, updated);
     await writeRuntimeFiles(root, updated);
     stdout.write(`Workspace registered: ${identity}\n`);
-    if (platform === "linux" && !readOnly) await writeAccessHint(identity, stdout);
+    if (platform === "linux" && !readOnly) await writeAccessHint(identity, stdout, workspaceMetadata);
     return applyWorkspaces(updated);
   }
   if (action === "remove") {
@@ -1792,8 +1795,8 @@ async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout
 
 // The CLIs run as uid 10001 in Docker; on Linux a bind-mounted folder keeps its host owner, so they cannot write to it.
 const CLI_UID = 10001;
-async function writeAccessHint(hostPath, stdout) {
-  const info = await stat(hostPath);
+async function writeAccessHint(hostPath, stdout, workspaceMetadata) {
+  const info = await workspaceMetadata(hostPath);
   if (info.uid === CLI_UID || (info.mode & 0o002) !== 0) return;
   const owner = process.getuid?.() ?? info.uid;
   stdout.write(
@@ -1803,18 +1806,29 @@ async function writeAccessHint(hostPath, stdout) {
   );
 }
 
-/** Streams one compose export into a 0600 archive; a failed export leaves no file. */
+/** Export inside a private directory, then retain the protected ACL on a same-volume rename. */
 async function exportArchive(archive, action, { root, config, service, stdin, stderr, execute }) {
-  const out = createWriteStream(archive, { mode: 0o600 });
-  await once(out, "open");
-  const code = await execute(
-    composeCommand(action, root, { profile: config.profile, companionsEnabled: config.companionsEnabled, service }),
-    { stdin, stdout: out, stderr }
-  ).catch(() => 1);
-  out.end();
-  await once(out, "close");
-  if (code !== 0) await rm(archive, { force: true });
-  return code === 0;
+  const { path: temporary, directory } = await createPrivateStagingFile(archive);
+  let out;
+  try {
+    out = createWriteStream(temporary, { flags: "r+" });
+    await once(out, "open");
+    const code = await execute(
+      composeCommand(action, root, { profile: config.profile, companionsEnabled: config.companionsEnabled, service }),
+      { stdin, stdout: out, stderr }
+    ).catch(() => 1);
+    out.end();
+    await once(out, "close");
+    if (code !== 0) return false;
+    await rename(temporary, archive);
+    return true;
+  } finally {
+    if (out && !out.closed) {
+      out.destroy();
+      await once(out, "close").catch(() => {});
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 const userArchive = (directory, userId, kind) => join(directory, "users", `${userSlug(userId)}-${kind}.tar.gz`);
@@ -1828,7 +1842,7 @@ async function addBackupExtras({ root, config, stdin, stdout, stderr, execute })
   if (!saved) stderr.write("The backup has no CLI settings (MCP servers, base URLs): the CLI service did not answer or has none.\n");
   // Each user's CLI settings and Space Memory, from their own container; their logins and keys never (MU-004).
   const users = config.users ?? [];
-  if (users.length > 0) await mkdir(join(directory, "users"), { recursive: true, mode: 0o700 });
+  if (users.length > 0) await mkdirPrivate(join(directory, "users"));
   let complete = 0;
   for (const user of users) {
     const service = `spaceapp-cli-${userSlug(user.id)}`;
