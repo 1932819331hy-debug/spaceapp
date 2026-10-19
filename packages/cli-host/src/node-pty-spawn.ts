@@ -1,5 +1,9 @@
-import { spawn } from "node-pty";
+import { createRequire } from "node:module";
 import type { CliHostSpawn } from "./types.js";
+
+const require = createRequire(import.meta.url);
+type NodePtyModule = typeof import("node-pty");
+let nodePty: NodePtyModule | undefined;
 
 /**
  * Disable the PTY interrupt characters (ISIG) for every CLI pane so that
@@ -8,11 +12,15 @@ import type { CliHostSpawn } from "./types.js";
  * CLI tree and the pane exits. Admin-initiated termination (SIGTERM/SIGHUP)
  * and app-level exits (Ctrl-D, /exit) are unaffected.
  */
-export const spawnNodePty: CliHostSpawn = (spec) =>
-  spawn("/bin/sh", ["-c", '/usr/bin/stty -isig; exec "$@"', "space-cli-host", spec.command, ...spec.args], {
+export const spawnNodePty: CliHostSpawn = (spec) => {
+  // Core uses the CLI host client but does not spawn PTYs. Resolve this native
+  // module only in the CLI host process when a session actually starts.
+  nodePty ??= require("node-pty") as NodePtyModule;
+  return nodePty.spawn("/bin/sh", ["-c", '/usr/bin/stty -isig; exec "$@"', "space-cli-host", spec.command, ...spec.args], {
     name: "xterm-256color",
     cols: spec.cols,
     rows: spec.rows,
     cwd: spec.cwd,
     env: spec.env
   });
+};

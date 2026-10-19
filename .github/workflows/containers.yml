@@ -7,6 +7,9 @@ on:
       - "packages/**"
       - "!packages/run-spaceapp/**"
       - "deploy/docker/**"
+      - "scripts/stage-container-targets.mjs"
+      - "scripts/container-image-size-budget.mjs"
+      - "scripts/container-runtime-smoke.mjs"
       - "starter-memory/**"
       - "Dockerfile"
       - "package-lock.json"
@@ -18,6 +21,9 @@ on:
       - "packages/**"
       - "!packages/run-spaceapp/**"
       - "deploy/docker/**"
+      - "scripts/stage-container-targets.mjs"
+      - "scripts/container-image-size-budget.mjs"
+      - "scripts/container-runtime-smoke.mjs"
       - "starter-memory/**"
       - "Dockerfile"
       - "package-lock.json"
@@ -69,5 +75,11 @@ jobs:
       - name: Enforce container size budget
         run: >-
           node scripts/container-image-size-budget.mjs
+          --target "${{ matrix.target }}"
+          --image "spaceapp-ci:${{ matrix.target }}-${{ matrix.arch }}"
+
+      - name: Smoke test target runtime
+        run: >-
+          node scripts/container-runtime-smoke.mjs
           --target "${{ matrix.target }}"
           --image "spaceapp-ci:${{ matrix.target }}-${{ matrix.arch }}"

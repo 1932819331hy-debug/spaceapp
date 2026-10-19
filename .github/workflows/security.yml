@@ -48,7 +48,10 @@ jobs:
             deploy/docker \
             starter-memory \
             Dockerfile \
-            package-lock.json; then
+            package-lock.json \
+            scripts/stage-container-targets.mjs \
+            scripts/container-runtime-smoke.mjs \
+            scripts/container-image-size-budget.mjs; then
             echo "required=false" >> "$GITHUB_OUTPUT"
           else
             echo "required=true" >> "$GITHUB_OUTPUT"

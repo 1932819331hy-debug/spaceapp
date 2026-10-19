@@ -21,6 +21,11 @@ test("public Dockerfile provides native multi-arch core, browser, and redistribu
   assert.match(dockerfile, /FROM .* AS core/);
   assert.match(dockerfile, /FROM .* AS browser/);
   assert.match(dockerfile, /FROM .* AS cli/);
+  assert.match(dockerfile, /node scripts\/stage-container-targets\.mjs --source \/app --output \/app-targets/);
+  assert.match(dockerfile, /COPY --from=build --chown=spaceapp:spaceapp \/app-targets\/core\/ \.\//);
+  assert.match(dockerfile, /COPY --from=build --chown=spaceapp:spaceapp \/app-targets\/browser\/ \.\//);
+  assert.match(dockerfile, /COPY --from=build --chown=spaceapp:spaceapp \/app-targets\/cli\/ \.\//);
+  assert.doesNotMatch(dockerfile, /COPY --from=build --chown=spaceapp:spaceapp \/app\/(?:node_modules|apps|packages) /);
   assert.deepEqual(nodeStages, [
     { image: nodeImage, stage: "build" },
     { image: nodeImage, stage: "runtime-base" }
@@ -38,7 +43,8 @@ test("public Dockerfile provides native multi-arch core, browser, and redistribu
   );
   assert.match(dockerfile, /await r\.json\(\)/);
   assert.match(dockerfile, /body\.ok !== true/);
-  assert.match(dockerfile, /rotate-owner-setup-token\.mjs/);
+  const stager = await readFile(join(root, "scripts", "stage-container-targets.mjs"), "utf8");
+  assert.match(stager, /scripts\/rotate-owner-setup-token\.mjs/);
   assert.match(dockerfile, /opencode-ai@1\.18\.4/);
   assert.doesNotMatch(dockerfile, /@openai\/codex|@google\/gemini-cli|@anthropic-ai\/claude-code|run-deepseek-cli/);
   const installer = await readFile(join(root, "deploy/docker/provider-install.mjs"), "utf8");

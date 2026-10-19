@@ -1,5 +1,8 @@
 import "./publish-npm-candidate.test.mjs";
 import "./container-image-size-budget.test.mjs";
+import "./container-runtime-smoke.test.mjs";
+import "./stage-container-targets.test.mjs";
+import "./node-pty-runtime-resolution.test.mjs";
 import "./mcp-hono-compatibility.test.mjs";
 import "./portable-backup-restore.test.mjs";
 import "./published-container-verification.test.mjs";
