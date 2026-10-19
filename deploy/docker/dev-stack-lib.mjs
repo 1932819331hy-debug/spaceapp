@@ -176,7 +176,7 @@ export async function ensureBuild(config, force = false, runner = run) {
   console.log(`[dev:stack] Source workspace build completed at ${new Date().toISOString()} (${Math.round((Date.now() - buildStartedAt) / 1000)}s).`);
 }
 
-export async function installOpenCode(config, version) {
+export async function installOpenCode(config, version, runner = run) {
   const packageJson = join(config.vendorDir, "node_modules", "opencode-ai", "package.json");
   let installed = null;
   if (existsSync(packageJson)) {
@@ -186,7 +186,7 @@ export async function installOpenCode(config, version) {
     await rm(config.vendorDir, { recursive: true, force: true });
     await mkdir(config.vendorDir, { recursive: true, mode: 0o700 });
     console.log(`[dev:stack] Installing pinned opencode-ai@${version} into dev state...`);
-    await run("npm", ["install", "--prefix", config.vendorDir, "--no-package-lock", "--no-save", "--no-audit", "--no-fund", `opencode-ai@${version}`]);
+    await runner("npm", ["install", "--prefix", config.vendorDir, "--no-package-lock", "--no-save", "--no-audit", "--no-fund", `opencode-ai@${version}`]);
   }
   const wrapper = join(config.binDir, "opencode-vscode-parity");
   const binary = join(config.vendorDir, "node_modules", ".bin", "opencode");

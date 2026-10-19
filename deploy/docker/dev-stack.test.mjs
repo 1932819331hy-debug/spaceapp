@@ -212,12 +212,95 @@ test("startup build ownership covers cancellation, success, and failure", { skip
       assert.equal(existsSync(migrationFile), mode === "success", "only successful builds may advance startup to migrations");
       assert.equal(existsSync(config.buildMarker), mode === "success", "only successful builds may write a success marker");
       if (mode === "success") {
-        assert.deepEqual(JSON.parse(await readFile(migrationFile, "utf8")).groups, [], "completed builds must be untracked before migrations");
+        assert.deepEqual(JSON.parse(await readFile(migrationFile, "utf8")).groups.map(record => record.name), ["migrations"], "completed builds must be untracked while migrations own their command group");
       }
       if (existsSync(config.processFile)) {
         assert.deepEqual(JSON.parse(await readFile(config.processFile, "utf8")).groups, [], "terminated builds must leave no tracked groups");
       }
       assert.equal(existsSync(config.pidFile), false);
+      assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "an unrelated process must remain alive");
+    } finally {
+      if (downCaller?.exitCode === null && downCaller?.signalCode === null) downCaller.kill("SIGKILL");
+      for (const pid of [supervisor?.pid, family?.leader, unrelated?.pid]) {
+        if (Number.isInteger(pid)) try { process.kill(-pid, "SIGKILL"); } catch {}
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("down and reset terminate in-progress migrations and OpenCode installs", { skip: process.platform === "win32" }, async (t) => {
+  for (const phase of ["db:migrate", "opencode-install"]) await t.test(phase, async () => {
+    const root = await mkdtemp(join(tmpdir(), "spaceapp-startup-command-"));
+    const config = await resolveConfig({}, root);
+    const bin = join(root, "fake-bin");
+    const familyFile = join(root, "command-family.json");
+    let supervisor;
+    let downCaller;
+    let unrelated;
+    let family;
+    let output = "";
+    try {
+      await mkdir(bin);
+      await mkdir(join(root, "packages", "run-spaceapp", "templates"), { recursive: true });
+      await writeFile(join(root, "packages", "run-spaceapp", "templates", "compose.yml"), `services:\n  postgres:\n    image: pgvector/pgvector:test@sha256:${"a".repeat(64)}\n  temporal:\n    image: temporalio/auto-setup:test@sha256:${"b".repeat(64)}\n`);
+      await writeFile(join(root, "Dockerfile"), "RUN npm install opencode-ai@1.18.4\n");
+      await writeFile(join(bin, "docker"), `#!${process.execPath}
+        const args = process.argv.slice(2);
+        if (args[0] === "inspect") console.log("healthy");
+        else if (args[0] === "compose" && args.includes("ps")) console.log("fixture-service");
+      `, { mode: 0o700 });
+      await writeFile(join(bin, "npm"), `#!${process.execPath}
+        const args = process.argv.slice(2);
+        const phase = args[0] === "install" ? "opencode-install" : args[1];
+        if (phase === ${JSON.stringify(phase)}) {
+          process.title = "npm " + args.slice(0, 2).join(" ");
+          const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { env: {}, stdio: ["ignore", "inherit", "inherit"] });
+          require("node:fs").writeFileSync(${JSON.stringify(familyFile)}, JSON.stringify({ leader: process.pid, descendant: descendant.pid }));
+          setInterval(() => {}, 1000);
+        }
+      `, { mode: 0o700 });
+      const launcher = join(root, "dev-stack.mjs");
+      const lifecycle = join(root, "lifecycle.mjs");
+      const libUrl = new URL("./dev-stack-lib.mjs", import.meta.url).href;
+      const stackUrl = new URL("./dev-stack.mjs", import.meta.url).href;
+      await writeFile(launcher, `
+        import { start } from ${JSON.stringify(stackUrl)};
+        import { resolveConfig } from ${JSON.stringify(libUrl)};
+        start(await resolveConfig({}, ${JSON.stringify(root)})).catch(error => { console.error(error.message); process.exitCode = 1; });
+      `);
+      await writeFile(lifecycle, `
+        import { down, reset } from ${JSON.stringify(stackUrl)};
+        import { resolveConfig } from ${JSON.stringify(libUrl)};
+        const command = process.argv[2] === "reset" ? reset : down;
+        command(await resolveConfig({}, ${JSON.stringify(root)})).catch(error => { console.error(error.message); process.exitCode = 1; });
+      `);
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` };
+      unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+      supervisor = spawn(process.execPath, [launcher], { detached: true, env, stdio: ["ignore", "pipe", "pipe"] });
+      supervisor.stdout.on("data", chunk => { output += chunk.toString(); });
+      supervisor.stderr.on("data", chunk => { output += chunk.toString(); });
+      const startedDeadline = Date.now() + 10000;
+      while (!existsSync(familyFile) && Date.now() < startedDeadline && supervisor.exitCode === null) await sleep(25);
+      assert.equal(existsSync(familyFile), true, output);
+      family = JSON.parse(await readFile(familyFile, "utf8"));
+      downCaller = spawn(process.execPath, [lifecycle, "down"], { env, stdio: ["ignore", "pipe", "pipe"] });
+      downCaller.stdout.on("data", chunk => { output += chunk.toString(); });
+      downCaller.stderr.on("data", chunk => { output += chunk.toString(); });
+      const stoppedDeadline = Date.now() + 10000;
+      while ((downCaller.exitCode === null && downCaller.signalCode === null || supervisor.exitCode === null && supervisor.signalCode === null) && Date.now() < stoppedDeadline) await sleep(25);
+      assert.equal(downCaller.exitCode, 0, output);
+      assert.notEqual(supervisor.exitCode, null, output);
+      const survivors = [];
+      for (const pid of [family.leader, family.descendant]) {
+        const result = await run("ps", ["-p", String(pid), "-o", "stat="], { capture: true, allowFailure: true });
+        if (result.code === 0 && !result.stdout.startsWith("Z")) survivors.push({ pid, state: result.stdout });
+      }
+      assert.deepEqual(survivors, [], `${phase} processes survived down: ${JSON.stringify(survivors)}`);
+      assert.equal(existsSync(config.pidFile), false);
+      assert.equal(existsSync(config.processFile), false);
+      await run(process.execPath, [lifecycle, "reset"], { env, capture: true });
+      assert.equal(existsSync(config.stateRoot), false);
       assert.doesNotThrow(() => process.kill(unrelated.pid, 0), "an unrelated process must remain alive");
     } finally {
       if (downCaller?.exitCode === null && downCaller?.signalCode === null) downCaller.kill("SIGKILL");

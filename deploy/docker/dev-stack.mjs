@@ -249,10 +249,10 @@ export async function start(config) {
     await processRecordWrite;
   };
 
-  const runBuild = async (command, args, options = {}) => {
-    if (stopping) throw new Error("Refusing to build while the dev stack is stopping.");
-    // Builds can spawn compilers of their own. Track the transient group just
-    // like a service so shutdown owns the whole tree, not only the npm leader.
+  const runCommand = async (name, command, args, options = {}) => {
+    if (stopping) throw new Error(`Refusing to run ${name} while the dev stack is stopping.`);
+    // Builds, migrations and npm installs can spawn children of their own.
+    // Track the transient group so shutdown owns the whole command tree.
     const child = spawnOwnedProcess(ownership, command, args, {
       cwd: config.root,
       env: options.env,
@@ -267,19 +267,20 @@ export async function start(config) {
     });
     if (!Number.isInteger(child.pid) || child.pid <= 1) {
       await completed;
-      throw new Error("Could not establish a process-group leader for the build.");
+      throw new Error(`Could not establish a process-group leader for ${name}.`);
     }
-    prefixStream(child.stdout, "build", process.stdout);
-    prefixStream(child.stderr, "build", process.stderr);
-    const entry = { child, record: { name: "build", pid: child.pid, pgid: child.pid, sid: child.pid } };
-    children.set("build", entry);
+    prefixStream(child.stdout, name, process.stdout);
+    prefixStream(child.stderr, name, process.stderr);
+    const entry = { child, record: { name, pid: child.pid, pgid: child.pid, sid: child.pid } };
+    children.set(name, entry);
     await Promise.all([persistChildren(), completed]);
-    if (children.get("build") === entry) {
-      children.delete("build");
+    if (children.get(name) === entry) {
+      children.delete(name);
       await persistChildren();
     }
-    if (stopping) throw new Error("Build cancelled while the dev stack is stopping.");
+    if (stopping) throw new Error(`${name} cancelled while the dev stack is stopping.`);
   };
+  const runBuild = (command, args, options) => runCommand("build", command, args, options);
 
   const stopChildren = async () => {
     const snapshot = [...children.values()];
@@ -340,7 +341,8 @@ export async function start(config) {
     if (repairedHelpers.length) {
       console.log(`[dev:stack] Repaired execute permission on ${repairedHelpers.length} node-pty macOS spawn helper(s).`);
     }
-    const openCodeWrapper = await installOpenCode(config, state.openCodeVersion);
+    const openCodeWrapper = await installOpenCode(config, state.openCodeVersion,
+      (command, args, options) => runCommand("opencode-install", command, args, options));
     const env = sourceEnv(config, state.databaseUrl, state.sessionSecret, openCodeWrapper);
     await addChild("cli-host", process.execPath, ["packages/cli-host/dist/main.js"], env);
     await addChild("worker", process.execPath, ["apps/worker/dist/worker.js"], env);
@@ -408,7 +410,7 @@ export async function start(config) {
     await ensureTemporalNamespace(config);
     await ensureBuild(config, false, runBuild);
     console.log("[dev:stack] Applying database migrations...");
-    await run("npm", ["run", "db:migrate"], { cwd: config.root, env: { ...process.env, SPACE_DATABASE_URL: databaseUrl } });
+    await runCommand("migrations", "npm", ["run", "db:migrate"], { env: { ...process.env, SPACE_DATABASE_URL: databaseUrl } });
     await spawnChildren(false, runtimeState);
     await waitReady(config);
     const setupBanner = await ownerSetupBanner(config);
