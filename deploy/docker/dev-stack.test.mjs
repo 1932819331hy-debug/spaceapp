@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import {
   ensureBuild,
   installOpenCode,
   ownerSetupBanner,
+  waitReady,
   parseOpenCodeVersion,
   parsePinnedImages,
   prepareState,
@@ -293,6 +295,36 @@ test("owner setup banner fails closed on unverifiable API status", async () => {
   }
 });
 
+test("readiness returns on deadline when HTTP headers or body never finish", { timeout: 7000 }, async () => {
+  for (const stallAfterHeaders of [false, true]) {
+    const server = createServer((_request, response) => {
+      if (stallAfterHeaders) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.flushHeaders();
+      }
+      // Deliberately never send a response body or end the connection.
+    });
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.once("error", rejectPromise);
+      server.listen(0, "127.0.0.1", resolvePromise);
+    });
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(
+        () => waitReady({ ports: { api: server.address().port } }, 150),
+        /did not reach \/readyz/,
+        stallAfterHeaders ? "stalled response body" : "stalled response headers"
+      );
+      assert.ok(Date.now() - startedAt < 2500, "readiness must honor an overall deadline");
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolvePromise, rejectPromise) => {
+        server.close((error) => error ? rejectPromise(error) : resolvePromise());
+      });
+    }
+  }
+});
+
 test("source stack derives third-party pins from canonical files", () => {
   const images = parsePinnedImages(`
 services:
@@ -514,6 +546,9 @@ test("unsafe state roots and installed-instance ports fail closed", async () => 
     await symlink(target, link);
     await assert.rejects(() => assertSafeStateRoot(link, join(root, "checkout")), /may not be a symlink/);
     await assert.rejects(() => resolveConfig({ SPACE_DEV_API_PORT: "4910" }, root), /reserved for an installed SpaceApp/);
+    await assert.rejects(() => resolveConfig({ SPACE_DEV_WEB_PORT: "4911" }, root), /reserved for an installed SpaceApp/);
+    await assert.rejects(() => resolveConfig({ SPACE_DEV_POSTGRES_PORT: "4910" }, root), /postgres port 4910 is reserved/);
+    await assert.rejects(() => resolveConfig({ SPACE_DEV_TEMPORAL_PORT: "4911" }, root), /temporal port 4911 is reserved/);
     await assert.rejects(() => resolveConfig({ SPACE_DEV_API_PORT: "6000", SPACE_DEV_WEB_PORT: "6000" }, root), /conflicts/);
   } finally {
     await rm(root, { recursive: true, force: true });
