@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { builtinModules } from "node:module";
+import { builtinModules, isBuiltin } from "node:module";
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -280,7 +280,7 @@ export async function stageContainerTarget({ source = repoRoot, output, target }
       resolutionEdges.push({ from, specifier, mode });
       return;
     }
-    if (nodeBuiltinNames.has(specifier)) {
+    if (nodeBuiltinNames.has(specifier) || (specifier.startsWith("node:") && isBuiltin(specifier))) {
       resolutionEdges.push({ from, specifier, mode, builtin: true });
       return;
     }

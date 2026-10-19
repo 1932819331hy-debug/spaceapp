@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -20,7 +21,7 @@ async function makeFixture(root) {
   }));
   await write(root, "apps/api/dist/databases/sqlite-worker.py", "# fixture\n");
   await write(root, "apps/api/dist/browser-host-main.js", 'import "@space/shared";\nimport "nested-only";\nnew URL("../package.json", import.meta.url);\n');
-  await write(root, "apps/api/dist/server.js", 'import "@space/shared";\nimport "./app.js";\nimport "./space-control-capture.js";\n');
+  await write(root, "apps/api/dist/server.js", 'import "@space/shared";\nimport "node:sqlite";\nimport "./app.js";\nimport "./space-control-capture.js";\n');
   await write(root, "apps/api/dist/app.js", 'import "./design/wiring.js";\n');
   await write(root, "apps/api/dist/design/wiring.js", 'import "./render.js";\n');
   await write(root, "apps/api/dist/design/render.js", 'new URL("../../../../scripts/space-design-render.mjs", import.meta.url);\n');
@@ -90,6 +91,8 @@ async function resolveManifestEdges(root, manifest) {
 }
 
 test("per-target runtime staging retains transitive closures and isolates node-pty to CLI", async (t) => {
+  assert.equal(isBuiltin("node:sqlite"), true);
+  assert.equal(isBuiltin("node:foo"), false);
   const root = await mkdtemp(join(tmpdir(), "spaceapp-stage-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "source");
@@ -127,6 +130,7 @@ test("per-target runtime staging retains transitive closures and isolates node-p
   ]);
   assert.match(coreManifest.excludedOptionalResources.find(({ path }) => path === "scripts/space-design-render.mjs").reason,
     /optional public module disabled by default/);
+  assert.ok(coreManifest.resolutionEdges.some(({ specifier, builtin }) => specifier === "node:sqlite" && builtin === true));
   await assert.rejects(readFile(join(output, "core/starter-memory/AGENTS.md")), { code: "ENOENT" });
 
   // The explicit public-export exceptions must not turn unrelated missing URL resources into silent omissions.
@@ -135,6 +139,14 @@ test("per-target runtime staging retains transitive closures and isolates node-p
   await assert.rejects(
     stageContainerTarget({ source, output: join(output, "core-missing-required-resource"), target: "core" }),
     /Cannot resolve local runtime import \.\.\/\.\.\/\.\.\/\.\.\/scripts\/required-extra\.mjs/
+  );
+
+  // isBuiltin must recognize actual node: builtins without accepting arbitrary node: specifiers.
+  await write(source, "apps/api/dist/server.js",
+    'import "@space/shared";\nimport "node:sqlite";\nimport "node:foo";\nimport "./app.js";\nimport "./space-control-capture.js";\n');
+  await assert.rejects(
+    stageContainerTarget({ source, output: join(output, "core-unknown-node-builtin"), target: "core" }),
+    /Cannot resolve installed dependency node:foo/
   );
 
   const cli = await stageContainerTarget({ source, output: join(output, "cli"), target: "cli" });
