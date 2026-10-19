@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "candidateDigest": "30eb46ad4f80af9717484e90e60dbff3dc4f71f9e2abbe6331e40321e4c4d2d9",
+  "candidateDigest": "8e12db64156e55c98ea08ec476ddfad42a06e5a0146a5c844a642e5ea4c3bbcf",
   "sourceCommit": "e2be6abf8efcdcc32c7c012292afc22b2148734c",
   "launcherVersion": "1.1.6",
   "runtimeVersion": "1.1.6",
-  "createdAt": "2026-10-19T02:04:16.583Z",
+  "createdAt": "2026-10-19T03:27:54.350Z",
   "checks": [
     {
       "platform": "linux",
@@ -472,6 +472,7 @@
     "Known exception, one failed check per system (first-agent, the free-model first answer): OpenCode Zen refused every free model from the lab's address (upstream, known since 1.1.5). The Getting Started first prompt ran on opencode/big-pickle and did not complete; the first-run picker tried all five free tool-capable candidates in catalog order (big-pickle, nemotron-3.5-super-vl-free, beam-free, longcat-2.5-preview-free, space-bunny-free; macOS process samples taken on candidate 3f1f528 the same day, each check ended in seconds, well under its 40 s limit) and none completed a tool call. The release validator accepts this exception only for 1.1.6 and only where acceptance.json names the operator decision efc30984 (public commit b088389); every other version and check stays strict.",
     "Every other AI check ran on OpenCode with Claude Sonnet 5.5 through Space Gateway's Claude API-key account (the OpenAI API-key account had no credits; the operator chose to continue without it), on lab keys scoped to that one account, set with credentials set claude (pilot F4 path) and disabled afterwards: the installer task on all three systems (supplementary first-agent-claude) and the telemetry answers. Claude sometimes reads OpenCode's own config folder and OpenCode asks first; the harness answered Allow once and counted it.",
     "Every result in this file was executed on candidate e2be6ab (source f8803d5d96): Linux vm218, Windows vm219 and macOS vm221 main sessions and the small/medium/large profiles of all three. Earlier candidates (3f1f528, 3ccad66, 780759e) are not counted.",
+    "Public commit ba7f46f changes only two API tests, after they failed on GitHub's runners in release run 39188998567: nous-attachments takes a fixed 4x3 PNG instead of the host's ffmpeg (Ubuntu's ffmpeg 6.1 writes that size as 4x2), and design-run accepts either order for two assets saved in the same millisecond. No product, launcher or workflow code changed: the launcher package is byte-identical to the tested one, and the core, CLI and browser images differ from the tested e2be6ab images only in those two test files (/app/apps/api/tests), which the product never runs; no lab check was rerun.",
     "Install telemetry Yes ran on Linux only, on a separate owned fixture purged afterwards; Telemetry No on all three systems: no install id, no marker, and no lab event at the collector over each No fixture's life.",
     "While no free model works, each new OpenCode pane first runs the free-model selection (up to 100 s) before its TUI starts; the two-native-panes check waited for both TUIs (macOS 60-75 s) and saw no out-of-memory kill on any system.",
     "On Windows the after-install readiness probe retries only 'not ready' for up to 3 minutes (one earlier sample landed in a 112 s stall of the Docker Desktop VM); in the accepted run it was ready at the first sample.",

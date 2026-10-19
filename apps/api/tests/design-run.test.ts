@@ -116,7 +116,7 @@ describe("Design pane request loop", () => {
 
     const delivered = await service.deliver(owner, pane, created.request.id, { assetIds: assets.map((asset) => asset.id), message: "Two sizes" });
     expect(delivered.request).toMatchObject({ status: "DELIVERED", message: "Two sizes" });
-    expect(delivered.assets.map((asset) => [asset.artifactId, asset.width])).toEqual(assets.map((asset) => [asset.artifactId, asset.width]).reverse());
+    expect(delivered.assets.map((asset) => [asset.artifactId, asset.width]).sort()).toEqual(assets.map((asset) => [asset.artifactId, asset.width]).sort());
     expect(attached).toEqual([{ postId: "mktpost:post123", assets: expect.arrayContaining([{ artifactId: assets[0]!.artifactId, label: "X post" }, { artifactId: assets[1]!.artifactId, label: "LinkedIn post" }]) }]);
     expect(notifications.filter((entry) => entry.action === "raise")).toEqual([{ action: "raise", key: `design:ready:${created.request.id}`, severity: "INFO", kind: "DESIGN_READY" }]);
     await expect(service.deliver(owner, pane, created.request.id, { assetIds: [assets[0]!.id] })).rejects.toThrow(/DELIVERED/);

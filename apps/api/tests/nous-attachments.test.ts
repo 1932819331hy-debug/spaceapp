@@ -22,8 +22,8 @@ const secret = "nous-attachments-secret-with-enough-length";
 const owner = "user:operator";
 const other = "user:other";
 
-// A 4x3 red PNG, and a one-second 64x48 MP4 made by the host's ffmpeg.
-const png = execFileSync("/usr/bin/ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=red:s=4x3", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]);
+// A 4x3 red PNG (fixed bytes: ffmpeg 6 writes this size as 4x2), and a one-second 64x48 MP4 made by the host's ffmpeg.
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAEElEQVR4nGP4w8AARww4OQDyTwvRz8ovMQAAAABJRU5ErkJggg==", "base64");
 const mp4Path = join(tmpdir(), `nous-attachments-${process.pid}.mp4`);
 execFileSync("/usr/bin/ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=64x48:d=1:r=10", "-pix_fmt", "yuv420p", mp4Path]);
 
