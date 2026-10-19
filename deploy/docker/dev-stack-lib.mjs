@@ -60,7 +60,7 @@ export async function resolveConfig(env = process.env, root = repoRoot) {
     if (seen.has(value)) throw new Error(`${name} conflicts with ${seen.get(value)} on port ${value}.`);
     seen.set(value, name);
   }
-  for (const [name, value] of [["api", ports.api], ["web", ports.web]]) {
+  for (const [name, value] of Object.entries(ports)) {
     if (value === 4910 || value === 4911) throw new Error(`${name} port ${value} is reserved for an installed SpaceApp.`);
   }
   const project = env.SPACE_DEV_COMPOSE_PROJECT || `spaceapp-dev-${rootHash}`;
@@ -324,13 +324,19 @@ export async function waitReady(config, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${config.ports.api}/readyz`);
+      // A server may accept a connection but never answer. Bound both
+      // headers and response-body reads, then honor the overall deadline.
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const response = await fetch(`http://127.0.0.1:${config.ports.api}/readyz`, {
+        signal: AbortSignal.timeout(Math.min(5_000, remainingMs))
+      });
       if (response.ok) {
         const body = await response.json();
         if (body.ok === true && body.dependencies?.database === "RUNNING" && body.dependencies?.worker === "RUNNING" && body.dependencies?.cliHost === "RUNNING") return body;
       }
     } catch {}
-    await sleep(500);
+    const remainingMs = Math.max(0, deadline - Date.now());
+    if (remainingMs > 0) await sleep(Math.min(500, remainingMs));
   }
   throw new Error("The source stack did not reach /readyz with database, worker and CLI host RUNNING.");
 }
